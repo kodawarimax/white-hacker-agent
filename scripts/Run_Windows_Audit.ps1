@@ -201,12 +201,45 @@ function Invoke-NativePowerShellAudit {
         }
     }
 
-    # The fallback is a smaller candidate-only engine. It does not implement
-    # the Python six-domain rubric; do not present a comparable numerical score.
-    $status = if ($scope.scanned_files -eq 0 -and $scope.enumeration_errors -eq 0 -and $scope.symlinks -eq 0 -and $scope.oversize_files -eq 0 -and $scope.read_errors -eq 0) { "unsupported" } else { "partial" }
+    # Score a finished read of every selected file. Same hard caps as the Python
+    # engine: any CRITICAL stays at or below 49 (Grade D), any HIGH at or below
+    # 69 (Grade C). An unfinished scan stays N/A so a partial read cannot look
+    # like a pass. @() is required on Windows PowerShell 5.1: one Where-Object
+    # hit is a scalar whose .Count is $null, which would drop the cap.
+    $scanIncomplete = ($scope.enumeration_errors -gt 0) -or ($scope.symlinks -gt 0) -or ($scope.oversize_files -gt 0) -or ($scope.read_errors -gt 0) -or [bool]$scope.file_limit_reached
+    if ($scope.scanned_files -le 0) {
+        $status = "unsupported"
+    } elseif ($scanIncomplete) {
+        $status = "partial"
+    } else {
+        $status = "completed"
+    }
+
     $finalScore = "N/A"
     $grade = "N/A"
-    $capReason = "状態: $status / PowerShell候補検出のみ。点数は算出不可。公開可否は判定しません。"
+    $rawScoreValue = $null
+    $capReason = "状態: $status / 検査が完了していないため点数は算出不可。公開可否は判定しません。"
+    if ($status -eq "completed") {
+        $critCount = @($findings | Where-Object { $_.severity -eq "CRITICAL" }).Count
+        $highCount = @($findings | Where-Object { $_.severity -eq "HIGH" }).Count
+        $medCount = @($findings | Where-Object { $_.severity -eq "MEDIUM" }).Count
+        $rawScoreValue = [Math]::Max(0, 100 - ($critCount * 15) - ($highCount * 10) - ($medCount * 4))
+        $finalScore = $rawScoreValue
+        $capReason = "キャップ適用なし（静的パターン検査の参考値。一致なしは安全の証明ではありません）"
+        if (($critCount -gt 0) -and ($finalScore -gt 49)) {
+            $finalScore = 49
+            $capReason = "CRITICAL（致命的弱点）が $critCount 件検出されたため、最高49点（Grade D: 要緊急是正）に上限固定しました。"
+        } elseif (($highCount -gt 0) -and ($finalScore -gt 69)) {
+            $finalScore = 69
+            $capReason = "HIGH（高リスク弱点）が $highCount 件検出されたため、最高69点（Grade C: 修正必須）に上限固定しました。"
+        }
+        if ($finalScore -ge 95) { $grade = "S" }
+        elseif ($finalScore -ge 85) { $grade = "A" }
+        elseif ($finalScore -ge 70) { $grade = "B" }
+        elseif ($finalScore -ge 50) { $grade = "C" }
+        elseif ($finalScore -ge 30) { $grade = "D" }
+        else { $grade = "F" }
+    }
     foreach ($item in $findings) {
         $item.code_snippet = "[SOURCE REDACTED]"
         $item | Add-Member -NotePropertyName verification_status -NotePropertyValue "PATTERN_MATCH_UNVERIFIED" -Force
@@ -253,21 +286,46 @@ function Invoke-NativePowerShellAudit {
     <h2 style="margin:0 0 8px 0;font-size:18px;color:#a5b4fc;">💼 経営者・非IT部門向け解説：なぜ情報漏洩リスクが経営に関わり、どんな損失につながるのか？</h2>
     <p style="margin:0;font-size:14px;color:#e0e7ff;">セキュリティの弱点は放置すると、<strong>①API不正利用課金やランサムウェア感染による営業停止・調査費用（数百万円〜）、②個人情報保護法上の行政報告・顧客通知義務、③取引先からの契約解除・信用失墜</strong>に直結します。</p>
   </div>
-  <h2>📋 検出されたセキュリティホールと是正計画 ($($findings.Count) 件)</h2>
+  <h2>📋 検出されたセキュリティホールと是正計画 ($(@($findings).Count) 件)</h2>
   $rowsHtml
 </div></body></html>
 "@
-    Set-Content -Path $htmlPath -Value $htmlContent -Encoding UTF8
-    Set-Content -Path $summaryPath -Value "# 包括セキュリティ監査レポート`n- 総合得点: **$finalScore / 100点 (Grade $grade)**`n- 検出件数: $($findings.Count) 件`n- 経営影響: 情報漏洩やランサムウェア感染による調査費用・法的報告義務・取引停止リスクを防ぐため、早期是正を推奨します。`n- HTMLレポート: $htmlPath" -Encoding UTF8
-    Add-Content -Path $summaryPath -Value "`n- 状態: $status / 採点不可 / 安全性・公開可否は判定しません。`n- 検査範囲: $($scope | ConvertTo-Json -Compress)`n- 検証状態: PATTERN_MATCH_UNVERIFIED。動的認可・HTTP・DB権限は未検証。" -Encoding UTF8
-    @{ status = $status; overall_score = $null; overall_grade = "N/A"; target = $ScanPath; files_scanned = $scope.scanned_files; scan_scope = $scope; host_audit = $hostChecks; limitations = @("limited_native_patterns", "dynamic_checks_not_run", "no_comparable_numeric_score") } | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $runDir "run.json") -Encoding UTF8
-    ConvertTo-Json -InputObject @($findings) -Depth 8 | Set-Content (Join-Path $runDir "vulnerabilities.json") -Encoding UTF8
-    @{ scorecard = @{ raw_score = $null; final_score = $null; grade = "N/A"; audit_coverage_percent = $null; verdict = "NOT_EVALUATED"; domain_scores = @() } } | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $runDir "audit_scorecard.json") -Encoding UTF8
-    "# 追加検査のご案内`n状態: $status。点数は算出不可。Python版での静的点検と、対象に応じた動的検証が必要です。公開可否は判定しません。" | Set-Content (Join-Path $runDir "maintenance_proposal.md") -Encoding UTF8
+    $reportedScore = $null
+    $reportedRaw = $null
+    $reportedVerdict = "NOT_EVALUATED"
+    if ($status -eq "completed") {
+        $reportedScore = [int]$finalScore
+        $reportedRaw = [int]$rawScoreValue
+        $reportedVerdict = "STATIC_PATTERN_REFERENCE"
+    }
+    $limitations = if ($status -eq "completed") {
+        @("limited_native_patterns", "dynamic_checks_not_run", "static_pattern_reference_only")
+    } else {
+        @("limited_native_patterns", "dynamic_checks_not_run", "score_not_calculated")
+    }
+    $summaryExtra = if ($status -eq "completed") {
+        "`n- 状態: completed / 総合得点: $finalScore / 100点 (Grade $grade) / 安全性・公開可否は判定しません。`n- 検査範囲: $($scope | ConvertTo-Json -Compress)`n- 検証状態: PATTERN_MATCH_UNVERIFIED。動的認可・HTTP・DB権限は未検証。"
+    } else {
+        "`n- 状態: $status / 採点不可 / 安全性・公開可否は判定しません。`n- 検査範囲: $($scope | ConvertTo-Json -Compress)`n- 検証状態: PATTERN_MATCH_UNVERIFIED。動的認可・HTTP・DB権限は未検証。"
+    }
+    $proposal = if ($status -eq "completed") {
+        "# 追加検査のご案内`n状態: completed。総合得点: $finalScore / 100点 (Grade $grade)。静的パターン検査の参考値であり、公開可否は判定しません。Python版での点検と、対象に応じた動的検証が必要です。"
+    } else {
+        "# 追加検査のご案内`n状態: $status。点数は算出不可。Python版での静的点検と、対象に応じた動的検証が必要です。公開可否は判定しません。"
+    }
 
+    Set-Content -Path $htmlPath -Value $htmlContent -Encoding UTF8
+    Set-Content -Path $summaryPath -Value "# 包括セキュリティ監査レポート`n- 総合得点: **$finalScore / 100点 (Grade $grade)**`n- 検出件数: $(@($findings).Count) 件`n- 経営影響: 情報漏洩やランサムウェア感染による調査費用・法的報告義務・取引停止リスクを防ぐため、早期是正を推奨します。`n- HTMLレポート: $htmlPath" -Encoding UTF8
+    Add-Content -Path $summaryPath -Value $summaryExtra -Encoding UTF8
+    @{ status = $status; overall_score = $reportedScore; overall_grade = $grade; target = $ScanPath; files_scanned = $scope.scanned_files; scan_scope = $scope; host_audit = $hostChecks; limitations = $limitations } | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $runDir "run.json") -Encoding UTF8
+    ConvertTo-Json -InputObject @($findings) -Depth 8 | Set-Content (Join-Path $runDir "vulnerabilities.json") -Encoding UTF8
+    @{ scorecard = @{ raw_score = $reportedRaw; final_score = $reportedScore; grade = $grade; audit_coverage_percent = $null; verdict = $reportedVerdict; domain_scores = @() } } | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $runDir "audit_scorecard.json") -Encoding UTF8
+    $proposal | Set-Content (Join-Path $runDir "maintenance_proposal.md") -Encoding UTF8
+
+    $script:NativeAuditStatus = $status
     Write-Host ""
     Write-Host "[OK] Windows監査レポートを生成しました: $htmlPath" -ForegroundColor Green
-    Write-Host "  🏆 総合セキュリティ得点(参考値): $finalScore / 100 点 (Grade $grade) / 検査ファイル数: $($files.Count) / パターン一致: $($findings.Count) 件" -ForegroundColor Cyan
+    Write-Host "  🏆 総合セキュリティ得点(参考値): $finalScore / 100 点 (Grade $grade) / 検査ファイル数: $(@($files).Count) / パターン一致: $(@($findings).Count) 件" -ForegroundColor Cyan
     if (-not $NoOpen) { Start-Process $htmlPath }
 }
 
@@ -322,6 +380,13 @@ if ($pyCmd) {
     if ($pyCmd -eq "py") { & py -3 $RunnerPy @scanArgs } else { & $pyCmd $RunnerPy @scanArgs }
     exit $LASTEXITCODE
 } else {
+    $script:NativeAuditStatus = "partial"
     Invoke-NativePowerShellAudit -ScanPath $TargetPath
+    # A finished native scan is success, same as the Python engine (exit 0).
+    # GitHub Actions invokes this step with `powershell -command ". '{0}'"` and
+    # appends `exit $LASTEXITCODE`. On that host any non-zero exit is reported
+    # as process exit code 1, so `exit 3` after a written report fails CI.
+    # Exit 3 is only for a scan that did not finish and therefore has no score.
+    if ($script:NativeAuditStatus -eq "completed") { exit 0 }
     exit 3
 }

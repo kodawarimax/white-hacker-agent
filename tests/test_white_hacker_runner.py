@@ -1,4 +1,7 @@
 import json
+import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -236,6 +239,117 @@ def get_order(order_id: int, current_user=Depends(get_logged_in_user)):
                 continue
             text = fpath.read_text(encoding="utf-8", errors="ignore")
             self.assertNotIn("/Users/", text, f"Personal macOS path leaked in {fpath}")
+
+
+def _powershell_executable():
+    """Prefer Windows PowerShell 5.1 on Windows; that is the CI host that failed."""
+    if os.name == "nt":
+        names = ("powershell.exe", "powershell", "pwsh")
+    else:
+        names = ("pwsh", "powershell")
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return found
+    fallback = Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+    if fallback.exists():
+        return str(fallback)
+    return None
+
+
+def _run_native_audit_like_actions(files):
+    """
+    Run the native launcher the way the windows-native-powershell job does:
+    powershell -command ". '{step}'" with $ErrorActionPreference='stop' and
+    `exit $LASTEXITCODE` appended. Copy the script so the run stays in a temp repo.
+    """
+    powershell = _powershell_executable()
+    repo = Path(tempfile.mkdtemp(prefix="wh-native-"))
+    scripts = repo / "scripts"
+    sample = repo / "sample"
+    scripts.mkdir()
+    sample.mkdir()
+    source = Path(__file__).resolve().parent.parent / "scripts" / "Run_Windows_Audit.ps1"
+    (scripts / "Run_Windows_Audit.ps1").write_bytes(source.read_bytes())
+    originals = {}
+    for name, text in files.items():
+        data = text.encode("utf-8")
+        (sample / name).write_bytes(data)
+        originals[name] = data
+    wrapper = repo / "gha_step.ps1"
+    wrapper.write_text(
+        "$ErrorActionPreference = 'stop'\n"
+        ".\\scripts\\Run_Windows_Audit.ps1 -TargetPath sample -NonInteractive -ForceNative -NoOpen\n"
+        "if ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) { exit $LASTEXITCODE }\n",
+        encoding="utf-8-sig",
+    )
+    try:
+        proc = subprocess.run(
+            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ". '.\\gha_step.ps1'"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=90,
+        )
+        cards = list((repo / "strix_runs").glob("run_*/audit_scorecard.json"))
+        reports = list((repo / "strix_runs").glob("run_*/report.html"))
+        scorecard = json.loads(cards[0].read_text(encoding="utf-8-sig"))["scorecard"] if cards else None
+        html = reports[0].read_text(encoding="utf-8-sig") if reports else ""
+        after = {name: (sample / name).read_bytes() for name in originals}
+        names = sorted(p.name for p in sample.iterdir())
+        return proc, scorecard, html, originals, after, names
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
+
+
+class TestNativePowerShellAudit(unittest.TestCase):
+    def setUp(self):
+        if _powershell_executable() is None:
+            self.skipTest("PowerShell is not installed")
+
+    def test_vulnerable_sample_scores_grade_d_and_exits_zero(self):
+        """The CI sample (SQLi + debug=true) must score 49/D and exit 0 under the Actions wrapper."""
+        proc, scorecard, html, originals, after, names = _run_native_audit_like_actions(
+            {
+                "web.config": '<configuration><system.web><compilation debug="true" /></system.web></configuration>\n',
+                "app.py": 'cursor.execute(f"SELECT * FROM u WHERE n = {n}")\n',
+            }
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + "\n" + proc.stderr)
+        self.assertIsNotNone(scorecard, proc.stdout + "\n" + proc.stderr)
+        self.assertEqual(scorecard["final_score"], 49)
+        self.assertEqual(scorecard["grade"], "D")
+        self.assertEqual(scorecard["raw_score"], 81)
+        self.assertIn("SQL", html)
+        self.assertIn("デバッグ", html)
+        self.assertNotIn("Grade S", html)
+        self.assertEqual(after, originals)
+        self.assertEqual(names, ["app.py", "web.config"])
+
+    def test_single_critical_finding_still_caps_on_scalar_count(self):
+        """One hit must still cap at 49. PS 5.1 .Count is $null on a scalar result."""
+        proc, scorecard, html, originals, after, names = _run_native_audit_like_actions(
+            {"app.py": 'cursor.execute(f"SELECT id FROM accounts WHERE id = {user_id}")\n'}
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + "\n" + proc.stderr)
+        self.assertEqual(scorecard["raw_score"], 85)
+        self.assertEqual(scorecard["final_score"], 49)
+        self.assertEqual(scorecard["grade"], "D")
+        self.assertNotIn("Grade S", html)
+        self.assertEqual(after, originals)
+        self.assertEqual(names, ["app.py"])
+
+    def test_clean_file_scores_100(self):
+        proc, scorecard, _html, originals, after, names = _run_native_audit_like_actions(
+            {"app.py": 'print("hello")\n'}
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + "\n" + proc.stderr)
+        self.assertEqual(scorecard["final_score"], 100)
+        self.assertEqual(scorecard["grade"], "S")
+        self.assertEqual(after, originals)
+        self.assertEqual(names, ["app.py"])
 
 
 if __name__ == "__main__":
