@@ -152,7 +152,7 @@ class VulnerabilityFinding:
     exploitability_score: int  # 1-5
     blast_radius_score: int  # 1-5
     risk_priority_score: int  # 1-125 (3軸積)
-    verification_status: str  # VERIFIED_REPRODUCIBLE
+    verification_status: str  # PATTERN_MATCH_UNVERIFIED
     file_path: str
     line_number: int
     code_snippet: str
@@ -196,7 +196,7 @@ class AuditScorecard:
     final_score: int  # 0-100 (致命的欠陥キャップ適用後の最終得点)
     max_score: int  # 100
     grade: str  # S, A, B, C, D, F
-    verdict: str  # PASS_PRODUCTION_READY / CONDITIONAL_FIX_REQUIRED / BLOCK_CRITICAL_RISK
+    verdict: str  # NO_MATCH_IN_STATIC_SCOPE / CONDITIONAL_FIX_REQUIRED / BLOCK_CRITICAL_RISK
     cap_applied: bool
     cap_reason: str
     audit_coverage_percent: int
@@ -219,10 +219,10 @@ class RunMetadata:
     files_scanned: int
     candidates_inspected: int
     false_positives_filtered: int
-    verified_vulnerabilities_count: int
+    pattern_match_count: int
     overall_score: int = 100
     overall_grade: str = "S"
-    overall_verdict: str = "PASS_PRODUCTION_READY"
+    overall_verdict: str = "NO_MATCH_IN_STATIC_SCOPE"
     coverage: Dict[str, str] = field(default_factory=dict)
     three_point_zero_check: Dict[str, str] = field(default_factory=dict)
 
@@ -387,6 +387,98 @@ class OrganizationTopologyAnalyzer:
         )
 
 
+_PLACEHOLDER_RE = re.compile(
+    r"(example|dummy|fake|sample|mock|placeholder|changeme|your[_-]?(key|token|secret)|x{6,}|\*{3,}|<[^>]+>|\$\{|real|test)",
+    re.IGNORECASE,
+)
+GENERIC_SECRET_RE = re.compile(
+    r"""\b\w*(api[_-]?key|secret([_-]?key)?|access[_-]?key|private[_-]?key|token|passwd|password|pwd)\s*[:=]\s*["']([^"'\s]{12,})["']""",
+    re.IGNORECASE,
+)
+_SANITIZER_RE = re.compile(r"(DOMPurify|sanitiz|sanitis)", re.IGNORECASE)
+
+
+def _shannon_entropy(text: str) -> float:
+    import math
+
+    if not text:
+        return 0.0
+    freq: Dict[str, int] = {}
+    for ch in text:
+        freq[ch] = freq.get(ch, 0) + 1
+    n = len(text)
+    return -sum((c / n) * math.log2(c / n) for c in freq.values())
+
+
+def _looks_like_placeholder(token: str) -> bool:
+    return bool(_PLACEHOLDER_RE.search(token)) or _shannon_entropy(token) < 2.8
+
+
+def build_code_mask(text: str, suffix: str) -> Optional[List[str]]:
+    """
+    各文字を 'c'(コード) / 's'(文字列リテラル内) / 'm'(コメント内) に分類する簡易レキサ。
+    コメントや文字列に書かれたパターンを「危険なコード」と誤認しないために使う。
+    対応: .py (# と三重引用符) / .js .ts .jsx .tsx .cs .php .java .go (// /* */ とテンプレートリテラル)。
+    それ以外の拡張子は None（マスクなし）。既知の限界: JS の正規表現リテラル内の引用符は誤解釈しうる。
+    """
+    py = suffix == ".py"
+    slash = suffix in (".js", ".jsx", ".ts", ".tsx", ".cs", ".php", ".java", ".go")
+    if not (py or slash):
+        return None
+    n = len(text)
+    mask = ["c"] * n
+
+    def mark(a: int, b: int, ch: str) -> None:
+        for k in range(a, min(b, n)):
+            mask[k] = ch
+
+    i = 0
+    while i < n:
+        ch = text[i]
+        if py and ch == "#":
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            mark(i, j, "m")
+            i = j
+            continue
+        if slash and text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            mark(i, j, "m")
+            i = j
+            continue
+        if slash and text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            mark(i, j, "m")
+            i = j
+            continue
+        if py and (text.startswith('"""', i) or text.startswith("'''", i)):
+            q = text[i : i + 3]
+            j = text.find(q, i + 3)
+            j = n if j < 0 else j + 3
+            mark(i, j, "s")
+            i = j
+            continue
+        if ch in "\"'" or (slash and ch == "`"):
+            j = i + 1
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == ch:
+                    break
+                if text[j] == "\n" and ch != "`":
+                    break
+                j += 1
+            end = min(j + 1, n)
+            mark(i, end, "s")
+            i = end
+            continue
+        i += 1
+    return mask
+
+
 class WhiteHackerScanner:
     """6大領域×4専門担当ロールによる組織横断コード・設定・ガバナンス検査＆誤検知除外エンジン"""
 
@@ -395,6 +487,35 @@ class WhiteHackerScanner:
         self.max_budget_usd = max_budget_usd
         self.candidates_inspected = 0
         self.false_positives_filtered = 0
+        self._mask: Optional[List[str]] = None
+        self._offsets: List[int] = []
+        self._nc: Optional[List[str]] = None
+        self._full: str = ""
+
+    def _prepare(self, content: str, suffix: str, lines: List[str]) -> None:
+        """ファイル単位のコード/コメント/文字列マスクと、コメント除去済み行を準備する"""
+        self._full = content
+        self._offsets = []
+        pos = 0
+        for ln in lines:
+            self._offsets.append(pos)
+            pos += len(ln) + 1
+        self._mask = build_code_mask(content, suffix)
+        if self._mask is None:
+            self._nc = None
+        else:
+            blanked = [(" " if self._mask[k] == "m" else content[k]) for k in range(len(content))]
+            self._nc = "".join(blanked).split("\n")
+
+    def _cm(self, rx: "re.Pattern[str]", line: str, i: int):
+        """コード領域（コメント・文字列リテラル外）で始まるマッチのみ返す"""
+        for m in rx.finditer(line):
+            if self._mask is None or i >= len(self._offsets):
+                return m
+            idx = self._offsets[i] + m.start()
+            if idx < len(self._mask) and self._mask[idx] == "c":
+                return m
+        return None
 
     def _collect_files(self, root_path: Path) -> List[Path]:
         if root_path.is_file():
@@ -431,12 +552,16 @@ class WhiteHackerScanner:
 
         for fpath in files:
             try:
+                if fpath.stat().st_size > 2_000_000:
+                    continue
                 content = fpath.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
 
             rel_path = str(fpath.relative_to(root.parent if root.is_file() else root)).replace("\\", "/")
-            lines = content.splitlines()
+            content = content.replace("\r\n", "\n")
+            lines = content.split("\n")
+            self._prepare(content, fpath.suffix.lower(), lines)
 
             # ① アクセス制御・業務ロジック・認可 (access_control)
             for f in self._check_idor_and_access_control(rel_path, lines, vuln_seq):
@@ -471,9 +596,10 @@ class WhiteHackerScanner:
         return findings, len(files), topology
 
     def _window(self, lines: List[str], idx: int, before: int = 8, after: int = 18) -> str:
+        src = self._nc if self._nc is not None and len(self._nc) == len(lines) else lines
         start = max(0, idx - before)
-        end = min(len(lines), idx + after)
-        return "\n".join(lines[start:end])
+        end = min(len(src), idx + after)
+        return "\n".join(src[start:end])
 
     def _make_finding(
         self,
@@ -506,7 +632,7 @@ class WhiteHackerScanner:
             exploitability_score=exp_s,
             blast_radius_score=blast_s,
             risk_priority_score=sev_s * exp_s * blast_s,
-            verification_status="VERIFIED_REPRODUCIBLE",
+            verification_status="PATTERN_MATCH_UNVERIFIED",
             file_path=file_path,
             line_number=line_number,
             code_snippet=code_snippet,
@@ -524,14 +650,14 @@ class WhiteHackerScanner:
         seq = start_seq
 
         route_id_re = re.compile(
-            r"""(@(app|router|bp)\.(get|post|put|delete|patch|route)\(['"].*(\{(order_id|id|user_id|invoice_id|doc_id)\}|<(int:)?(order_id|id|user_id)>)|export\s+async\s+function\s+(GET|POST|PUT|DELETE|PATCH)\s*\(|(app|router)\.(get|post|put|delete|patch)\(['"][^'"]*:(order_id|id|userId))"""
+            r"""(@(app|router|bp|api)\.(get|post|put|delete|patch|route)\(\s*['"][^'"]*(\{\w*[iI]d\}|<(\w+:)?\w*[iI]d>|:\w*[iI]d\b)|export\s+async\s+function\s+(GET|POST|PUT|DELETE|PATCH)\s*\(|(app|router)\.(get|post|put|delete|patch)\(\s*['"][^'"]*:\w*[iI]d\b)"""
         )
         ownership_guard_re = re.compile(
-            r"(user_id\s*==|user_id\s*!=|owner_id\s*==|owner_id\s*!=|current_user\.id|session\.user\.id|req\.user\.id|check_ownership|authorize_resource|where:.*userId)",
+            r"(user_id\s*[!=]=|owner_id\s*[!=]=|\.owner\s*[!=]=|current_user\.\w+|session\.user\.\w+|req\.user\.\w+|request\.user\b|check_ownership|authorize_\w+|authorize\(|permission|can_access|where:.*userId|owner\s*:)",
             re.IGNORECASE,
         )
         direct_lookup_re = re.compile(
-            r"(\.get\(\s*(order_id|id|item_id)|findUnique\(\s*\{\s*where:\s*\{\s*id\b|findById\(|SELECT\s+.*FROM\s+\w+\s+WHERE\s+(id|order_id)\s*=|ORDERS\[\s*(order_id|id)\s*\])",
+            r"(\.get\(\s*\w*[iI]d\b|find(Unique|One|ById|ByPk)?\(\s*(\{[^)]*)?(req|request)\.(params|query|body)|findUnique\(\s*\{\s*where:\s*\{\s*\w*[iI]d\b|findById\(|\.objects\.get\(\s*(pk|id)\s*=|SELECT\s+.*FROM\s+\w+\s+WHERE\s+\w*id\s*=|ORDERS\[\s*\w*[iI]d\s*\])",
             re.IGNORECASE,
         )
 
@@ -545,7 +671,7 @@ class WhiteHackerScanner:
         )
 
         for i, line in enumerate(lines):
-            if route_id_re.search(line):
+            if self._cm(route_id_re, line, i):
                 self.candidates_inspected += 1
                 scope_text = self._window(lines, i, before=2, after=22)
                 if direct_lookup_re.search(scope_text):
@@ -592,7 +718,7 @@ class WhiteHackerScanner:
                         )
                         seq += 1
 
-            elif "/admin/" in line and admin_route_re.search(line):
+            elif "/admin/" in line and self._cm(admin_route_re, line, i):
                 self.candidates_inspected += 1
                 scope_text = self._window(lines, i, before=2, after=18)
                 if admin_guard_re.search(scope_text):
@@ -648,7 +774,7 @@ class WhiteHackerScanner:
         )
 
         for i, line in enumerate(lines):
-            if jwt_unsafe_re.search(line):
+            if self._cm(jwt_unsafe_re, line, i):
                 self.candidates_inspected += 1
                 results.append(
                     self._make_finding(
@@ -679,7 +805,7 @@ class WhiteHackerScanner:
                 )
                 seq += 1
 
-            elif cookie_insecure_re.search(line):
+            elif self._cm(cookie_insecure_re, line, i):
                 self.candidates_inspected += 1
                 results.append(
                     self._make_finding(
@@ -715,7 +841,7 @@ class WhiteHackerScanner:
         seq = start_seq
 
         sqli_re = re.compile(
-            r"""(execute\(\s*f['"]\s*(SELECT|INSERT|UPDATE|DELETE)\b|execute\(\s*['"](SELECT|INSERT|UPDATE|DELETE)\b.*['"]\s*%\s*|query\(\s*`\s*(SELECT|INSERT|UPDATE|DELETE)\b.*\$\{)""",
+            r"""(execute(many)?\(\s*f['"]\s*(SELECT|INSERT|UPDATE|DELETE)\b|execute\(\s*['"](SELECT|INSERT|UPDATE|DELETE)\b.*['"]\s*%\s*[\w(]|(execute|query|raw|executemany|exec_driver_sql)\(\s*[^)]*\b(SELECT|INSERT|UPDATE|DELETE)\b[^)]*['"]\s*(\+|\.format\()|query\(\s*`\s*(SELECT|INSERT|UPDATE|DELETE)\b.*\$\{|FromSqlRaw\(\s*\$")""",
             re.IGNORECASE,
         )
         cmdi_re = re.compile(
@@ -723,11 +849,11 @@ class WhiteHackerScanner:
         )
         xss_re = re.compile(r"(dangerouslySetInnerHTML\s*=|v-html\s*=)")
         ssrf_re = re.compile(
-            r"(requests\.(get|post)\(\s*(req\.|request\.|user_url|target_url|url\b)|urllib\.request\.urlopen\(\s*(req\.|request\.|user_url|target_url))"
+            r"(requests\.(get|post|put)\(\s*(req\.|request\.|user_url|target_url|url\b)|urllib\.request\.urlopen\(\s*(req\.|request\.|user_url|target_url)|\bfetch\(\s*(req|request)\.(query|body|params)|axios\.(get|post|put)\(\s*(req|request)\.(query|body|params)|http\.get\(\s*(req|request)\.(query|body|params))"
         )
 
         for i, line in enumerate(lines):
-            if sqli_re.search(line):
+            if self._cm(sqli_re, line, i):
                 self.candidates_inspected += 1
                 results.append(
                     self._make_finding(
@@ -758,7 +884,7 @@ class WhiteHackerScanner:
                 )
                 seq += 1
 
-            elif cmdi_re.search(line):
+            elif self._cm(cmdi_re, line, i):
                 self.candidates_inspected += 1
                 results.append(
                     self._make_finding(
@@ -789,22 +915,23 @@ class WhiteHackerScanner:
                 )
                 seq += 1
 
-            elif xss_re.search(line):
+            elif self._cm(xss_re, line, i):
                 self.candidates_inspected += 1
                 scope_text = self._window(lines, i, before=5, after=5)
-                if "DOMPurify" in scope_text or "sanitize" in scope_text.lower():
+                if _SANITIZER_RE.search(scope_text):
                     self.false_positives_filtered += 1
                     continue
+                file_has_sanitizer = bool(_SANITIZER_RE.search(self._full))
                 results.append(
                     self._make_finding(
                         seq=seq,
-                        title="クロスサイトスクリプティング（XSS / 画面での不正プログラム実行）",
+                        title="クロスサイトスクリプティング（XSS / 画面での不正プログラム実行）" + ("（ファイル内にサニタイザ参照あり・データの流れ要確認）" if file_has_sanitizer else ""),
                         domain_key="input_injection",
                         role="Input & Injection Auditor (画面・XSS担当)",
                         category="OWASP A03: Cross-Site Scripting (XSS)",
-                        severity="HIGH",
-                        sev_s=4,
-                        exp_s=4,
+                        severity="MEDIUM" if file_has_sanitizer else "HIGH",
+                        sev_s=3 if file_has_sanitizer else 4,
+                        exp_s=3 if file_has_sanitizer else 4,
                         blast_s=3,
                         file_path=rel_path,
                         line_number=i + 1,
@@ -824,7 +951,7 @@ class WhiteHackerScanner:
                 )
                 seq += 1
 
-            elif ssrf_re.search(line):
+            elif self._cm(ssrf_re, line, i):
                 self.candidates_inspected += 1
                 scope_text = self._window(lines, i, before=6, after=6)
                 if "allowlist" in scope_text.lower() or "validate_url" in scope_text.lower():
@@ -865,7 +992,7 @@ class WhiteHackerScanner:
         seq = start_seq
 
         secret_re = re.compile(
-            r"""(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|AIza[0-9A-Za-z_-]{35}|AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----)"""
+            r"""(sk-[A-Za-z0-9_-]{20,}|sk_live_[0-9A-Za-z]{16,}|rk_live_[0-9A-Za-z]{16,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AIza[0-9A-Za-z_-]{35}|AKIA[0-9A-Z]{16}|xox[baprs]-[0-9A-Za-z-]{10,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----)"""
         )
         frontend_secret_re = re.compile(
             r"(NEXT_PUBLIC_[A-Z0-9_]*(SECRET|PRIVATE|SERVICE_ROLE|API_KEY)|VITE_[A-Z0-9_]*(SECRET|PRIVATE|SERVICE_ROLE))"
@@ -875,6 +1002,9 @@ class WhiteHackerScanner:
             if "pattern:" in line or "secret_re" in line or "EXAMPLE" in line.upper():
                 continue
             m = secret_re.search(line)
+            if m and _looks_like_placeholder(m.group(1)):
+                self.false_positives_filtered += 1
+                m = None
             if m:
                 self.candidates_inspected += 1
                 token_preview = m.group(1)[:8] + "...[REDACTED]"
@@ -906,7 +1036,7 @@ class WhiteHackerScanner:
                 )
                 seq += 1
 
-            elif frontend_secret_re.search(line):
+            elif self._cm(frontend_secret_re, line, i):
                 self.candidates_inspected += 1
                 results.append(
                     self._make_finding(
@@ -929,6 +1059,35 @@ class WhiteHackerScanner:
                         root_cause="サーバー専用にすべき秘密鍵にフロントエンド公開用プレフィックスを付与している。",
                         remediation="`NEXT_PUBLIC_` / `VITE_` を外し、サーバー側のAPIルート内でのみ参照してください。",
                         patch_example="const secret = process.env.SUPABASE_SERVICE_ROLE_KEY; // サーバー側のみで使用",
+                    )
+                )
+                seq += 1
+
+            elif GENERIC_SECRET_RE.search(line):
+                gm = GENERIC_SECRET_RE.search(line)
+                val = gm.group(3) if gm else ""
+                if _looks_like_placeholder(val) or _shannon_entropy(val) < 3.3:
+                    continue
+                self.candidates_inspected += 1
+                results.append(
+                    self._make_finding(
+                        seq=seq,
+                        title="認証情報らしき文字列のハードコード（要手動確認）",
+                        domain_key="secrets_data",
+                        role="API & Cloud Config Scanner (設定・シークレット担当)",
+                        category="OWASP A02/A05: Possible Hardcoded Credential",
+                        severity="HIGH",
+                        sev_s=4,
+                        exp_s=4,
+                        blast_s=4,
+                        file_path=rel_path,
+                        line_number=i + 1,
+                        code_snippet="Possible credential assignment [REDACTED]",
+                        what_happens="`password` / `secret` / `token` / `api_key` 名の変数に高エントロピーの文字列が直接代入されています。実際の認証情報であれば漏洩時に不正利用されます。",
+                        reproduction_steps=[f"1. `{rel_path}:{i + 1}` の代入が実在の認証情報かを手動で確認する。"],
+                        root_cause="認証情報らしき値のソースコード内直接記載（要手動確認）。",
+                        remediation="実在の値であれば再発行し、環境変数やシークレットマネージャへ移行してください。",
+                        patch_example="TOKEN = os.environ['APP_TOKEN']",
                     )
                 )
                 seq += 1
@@ -985,7 +1144,7 @@ class WhiteHackerScanner:
                     )
                     seq += 1
 
-            elif cors_wildcard_re.search(line):
+            elif self._cm(cors_wildcard_re, line, i):
                 self.candidates_inspected += 1
                 scope_text = self._window(lines, i, before=4, after=6)
                 if "allow_credentials=True" in scope_text or "credentials: true" in scope_text.lower():
@@ -1014,7 +1173,7 @@ class WhiteHackerScanner:
                     )
                     seq += 1
 
-            elif debug_prod_re.search(line):
+            elif self._cm(debug_prod_re, line, i):
                 self.candidates_inspected += 1
                 results.append(
                     self._make_finding(
@@ -1053,7 +1212,7 @@ class WhiteHackerScanner:
         eval_exec_re = re.compile(r"\b(eval|exec)\(\s*(req\.|request\.|user_input|body|untrusted)")
 
         for i, line in enumerate(lines):
-            if eval_exec_re.search(line):
+            if self._cm(eval_exec_re, line, i):
                 self.candidates_inspected += 1
                 results.append(
                     self._make_finding(
@@ -1195,10 +1354,10 @@ class ComprehensiveAuditScorer:
         # グレードと判定
         if final_score >= 95:
             grade = "S"
-            verdict = "PASS_PRODUCTION_READY (極めて良好・要定期監査)"
+            verdict = "NO_MATCH_IN_STATIC_SCOPE (静的パターン検査の範囲では一致なし・安全保証ではない)"
         elif final_score >= 85:
             grade = "A"
-            verdict = "PASS_PRODUCTION_READY (良好・軽微な改善推奨)"
+            verdict = "NO_MATCH_IN_STATIC_SCOPE (一致は軽微・安全保証ではない)"
         elif final_score >= 70:
             grade = "B"
             verdict = "CONDITIONAL_PASS (中程度のリスクあり・計画的修正推奨)"
@@ -1289,7 +1448,7 @@ def _build_maintenance_proposal_md(
 ## 2. 今回の初回監査結果に基づく3フェーズ改善ロードマップ
 
 ### 🚨 Phase 1（初月）: 緊急是正＆スコア引き上げ（目標: Grade A [85点以上] 達成）
-現在検出されている以下の優先リスクを最小差分で修正し、同じ再現手順で再テストを行って「確実に塞がったこと」を証明します。
+現在検出されている以下の優先リスクを最小差分で修正し、再スキャンで該当パターンが消えたことを確認します（手動レビューを併用）。
 {urgent_list_md}
 
 ### 🔄 Phase 2（2〜3ヶ月目）: 組織全体の信頼境界（6大領域）の標準化
@@ -1449,7 +1608,7 @@ def _build_html_report(
       <h1 style="margin:0 0 8px 0;font-size:24px;">🛡️ 包括的組織セキュリティ監査レポート</h1>
       <p style="margin:0 0 8px 0;font-size:15px;"><strong>総合判定:</strong> {html.escape(scorecard.verdict)}</p>
       <p style="margin:0;font-size:13px;color:#94a3b8;">
-        対象: <code>{html.escape(metadata.target)}</code> ｜ 素点合計: {scorecard.raw_score}/100点 ｜ 監査カバレッジ率: {scorecard.audit_coverage_percent}% ｜ 誤検知除外: {metadata.false_positives_filtered}件
+        対象: <code>{html.escape(metadata.target)}</code> ｜ 素点合計: {scorecard.raw_score}/100点 ｜ カバレッジ率: 算出不可（静的パターン検査のため） ｜ 誤検知除外: {metadata.false_positives_filtered}件
       </p>
     </div>
     <div class="score-box">
@@ -1459,6 +1618,7 @@ def _build_html_report(
   </div>
 
   {cap_banner}
+  <div class="cap-alert" style="background:#422006;border-color:#f59e0b;color:#fde68a;">⚠️ 本スコアは静的パターン検査（正規表現）の<strong>参考値</strong>です。一致なし＝安全ではなく、一致した項目も手動確認が必要です。ペネトレーションテスト・専門家レビューの代替ではありません。</div>
 
   <div class="grid-2">
     <div class="panel">
@@ -1593,7 +1753,7 @@ def write_strix_compatible_run(
 - **担当ロール**: {f.role}
 - **分類**: {f.category}
 - **重要度**: `{f.severity}` (3軸リスク優先度スコア: **{f.risk_priority_score} / 125** = 深刻度{f.severity_score} × 悪用容易性{f.exploitability_score} × 影響範囲{f.blast_radius_score})
-- **検証状態**: `{f.verification_status}`（誤検知除外済み）
+- **検証状態**: `{f.verification_status}`（静的パターン一致・要手動確認）
 - **場所**: `{f.file_path}:{f.line_number}`
 
 ## 1. 何が起きるか（リスク概要）
@@ -1650,7 +1810,9 @@ def write_strix_compatible_run(
 
     summary_md = f"""# 🛡️ 包括的組織セキュリティ監査レポート (`{metadata.run_id}`)
 
-## 🏆 1. 総合セキュリティ得点（100点満点採点）
+## 🏆 1. 総合セキュリティ得点（静的パターン検査の参考値）
+
+> ⚠️ 本スコアは静的パターン検査（正規表現）の**参考値**です。一致なし＝安全ではなく、一致した項目も手動確認が必要です。ペネトレーションテスト・専門家レビューの代替ではありません。
 
 | 項目 | 評価結果 |
 | :--- | :--- |
@@ -1658,7 +1820,7 @@ def write_strix_compatible_run(
 | **監査グレード (Grade)** | **Grade `{scorecard.grade}`** |
 | **リリース可否判定 (Verdict)** | **{scorecard.verdict}** |
 | **致命的欠陥キャップ判定** | {scorecard.cap_reason} |
-| **監査カバレッジ率（推定）** | **{scorecard.audit_coverage_percent}%** （検査モード: `{metadata.mode}` / 検査ファイル数: {metadata.files_scanned} 件 / 誤検知除外: {metadata.false_positives_filtered} 件） |
+| **監査カバレッジ率（推定）** | **算出不可（静的パターン検査のため）** （検査モード: `{metadata.mode}` / 検査ファイル数: {metadata.files_scanned} 件 / 誤検知除外: {metadata.false_positives_filtered} 件） |
 | **推奨継続保守プラン** | **{recommended_plan}** （提案書: `{run_dir / 'maintenance_proposal.md'}`） |
 | **ビジュアルHTMLレポート** | `{run_dir / 'report.html'}` |
 
@@ -1721,6 +1883,95 @@ def write_strix_compatible_run(
     return run_dir
 
 
+class ExternalToolBridge:
+    """
+    gitleaks / semgrep が導入済みの場合に、その結果を同じ採点・レポートへ取り込む（任意・--with-external）。
+    自前の正規表現より実績のあるエンジンを優先利用するための橋渡し。
+    - gitleaks: --no-git --redact で完全ローカル実行（外部送信なし）
+    - semgrep : --metrics=off。ルール取得のため既定では外部通信が発生する（--semgrep-config でローカルルールを指定可）
+    """
+
+    SEMGREP_SEVERITY = {"ERROR": ("HIGH", 4, 4, 4), "WARNING": ("MEDIUM", 3, 3, 3), "INFO": ("LOW", 2, 2, 2)}
+
+    @staticmethod
+    def _domain_for(rule_id: str) -> str:
+        r = rule_id.lower()
+        if any(k in r for k in ("sql", "inject", "xss", "ssrf", "command", "traversal", "deserial")):
+            return "input_injection"
+        if any(k in r for k in ("jwt", "auth", "session", "cookie", "csrf")):
+            return "auth_session"
+        if any(k in r for k in ("secret", "key", "token", "password", "crypto", "hash")):
+            return "secrets_data"
+        if any(k in r for k in ("idor", "access", "authoriz", "permission")):
+            return "access_control"
+        return "infra_supply_chain"
+
+    def parse_gitleaks(self, data: Any, start_seq: int) -> List[VulnerabilityFinding]:
+        out: List[VulnerabilityFinding] = []
+        for k, item in enumerate(data or []):
+            seq = start_seq + k
+            out.append(VulnerabilityFinding(
+                id=f"WH-{seq:03d}", title=f"[gitleaks] {item.get('Description') or item.get('RuleID', 'secret')}",
+                domain_key="secrets_data", role="External: gitleaks", category=f"gitleaks:{item.get('RuleID', '')}",
+                severity="CRITICAL", severity_score=5, exploitability_score=5, blast_radius_score=5, risk_priority_score=125,
+                verification_status="EXTERNAL_TOOL_REPORTED", file_path=str(item.get("File", "")).replace("\\", "/"),
+                line_number=int(item.get("StartLine", 0) or 0), code_snippet="[REDACTED by gitleaks --redact]",
+                what_happens="gitleaks が秘密情報パターンを検出しました。", reproduction_steps=["1. 該当ファイル・行の値が実在の認証情報かを確認する。"],
+                root_cause="秘密情報のソース/設定ファイルへの直接記載。", remediation="直ちに失効・再発行し、環境変数/シークレットマネージャへ移行。",
+                patch_example="# 値を削除し環境変数から読み込む",
+            ))
+        return out
+
+    def parse_semgrep(self, data: Any, start_seq: int) -> List[VulnerabilityFinding]:
+        out: List[VulnerabilityFinding] = []
+        for k, item in enumerate((data or {}).get("results", [])):
+            seq = start_seq + k
+            extra = item.get("extra", {}) or {}
+            sev, s_, e_, b_ = self.SEMGREP_SEVERITY.get(str(extra.get("severity", "INFO")).upper(), ("LOW", 2, 2, 2))
+            rule = str(item.get("check_id", "semgrep"))
+            out.append(VulnerabilityFinding(
+                id=f"WH-{seq:03d}", title=f"[semgrep] {rule.split('.')[-1]}", domain_key=self._domain_for(rule),
+                role="External: semgrep", category=f"semgrep:{rule}", severity=sev, severity_score=s_,
+                exploitability_score=e_, blast_radius_score=b_, risk_priority_score=s_ * e_ * b_,
+                verification_status="EXTERNAL_TOOL_REPORTED", file_path=str(item.get("path", "")).replace("\\", "/"),
+                line_number=int((item.get("start") or {}).get("line", 0) or 0), code_snippet=str(extra.get("lines", ""))[:200],
+                what_happens=str(extra.get("message", "semgrep ルール一致")), reproduction_steps=["1. semgrep の指摘箇所を手動で確認する。"],
+                root_cause=f"semgrep ルール `{rule}` に一致。", remediation=str(extra.get("fix", "ルールの推奨修正に従う。")),
+                patch_example="# semgrep ルールの説明を参照",
+            ))
+        return out
+
+    def run(self, target: str, start_seq: int, semgrep_config: str = "auto") -> Tuple[List[VulnerabilityFinding], List[str]]:
+        import shutil
+        import tempfile as _tf
+
+        findings: List[VulnerabilityFinding] = []
+        notes: List[str] = []
+        gl = shutil.which("gitleaks")
+        if gl:
+            with _tf.TemporaryDirectory() as td:
+                rp = os.path.join(td, "gl.json")
+                subprocess.run([gl, "detect", "--no-git", "--redact", "--source", target, "--report-format", "json", "--report-path", rp],
+                               capture_output=True, text=True, timeout=300, check=False)
+                if os.path.exists(rp):
+                    findings += self.parse_gitleaks(json.load(open(rp, encoding="utf-8")), start_seq)
+                    notes.append("gitleaks: 実行済み")
+        else:
+            notes.append("gitleaks: 未導入（スキップ）")
+        sg = shutil.which("semgrep")
+        if sg:
+            proc = subprocess.run([sg, "--config", semgrep_config, "--json", "--metrics=off", "--quiet", target],
+                                  capture_output=True, text=True, timeout=900, check=False)
+            try:
+                findings += self.parse_semgrep(json.loads(proc.stdout or "{}"), start_seq + len(findings))
+                notes.append(f"semgrep: 実行済み (config={semgrep_config})")
+            except json.JSONDecodeError:
+                notes.append("semgrep: 出力を解析できませんでした")
+        else:
+            notes.append("semgrep: 未導入（スキップ）")
+        return findings, notes
+
+
 class HostPostureAuditor:
     """
     WindowsクライアントPC / Windows Server / Linux / macOS 対応の
@@ -1767,7 +2018,7 @@ class HostPostureAuditor:
                             exploitability_score=4,
                             blast_radius_score=5,
                             risk_priority_score=80,
-                            verification_status="VERIFIED_REPRODUCIBLE",
+                            verification_status="PATTERN_MATCH_UNVERIFIED",
                             file_path="Windows_OS/Firewall_Profile",
                             line_number=1,
                             code_snippet="netsh advfirewall show allprofiles -> State OFF",
@@ -1816,7 +2067,7 @@ class HostPostureAuditor:
                                 exploitability_score=e_score,
                                 blast_radius_score=b_score,
                                 risk_priority_score=s_score * e_score * b_score,
-                                verification_status="VERIFIED_REPRODUCIBLE",
+                                verification_status="PATTERN_MATCH_UNVERIFIED",
                                 file_path=f"{os_name}_Host/Network_Port_{port_num}",
                                 line_number=port_num,
                                 code_snippet=line.strip(),
@@ -1875,6 +2126,14 @@ def run_scan_command(args: argparse.Namespace) -> int:
             trust_boundaries=["External HTTP Client ➔ Staging Server"],
         )
 
+    if getattr(args, "with_external", False) and target_type != "staging_url":
+        ext_findings, ext_notes = ExternalToolBridge().run(
+            msg_or_path, len(findings) + 1, getattr(args, "semgrep_config", "auto")
+        )
+        findings.extend(ext_findings)
+        for note in ext_notes:
+            print(f"  [external] {note}")
+
     if getattr(args, "include_host_audit", False):
         host_findings = HostPostureAuditor().audit_local_host(start_seq=len(findings) + 1)
         findings.extend(host_findings)
@@ -1905,7 +2164,7 @@ def run_scan_command(args: argparse.Namespace) -> int:
         files_scanned=files_scanned,
         candidates_inspected=scanner.candidates_inspected,
         false_positives_filtered=scanner.false_positives_filtered,
-        verified_vulnerabilities_count=len(findings),
+        pattern_match_count=len(findings),
         overall_score=scorecard.final_score,
         overall_grade=scorecard.grade,
         overall_verdict=scorecard.verdict,
@@ -1922,7 +2181,7 @@ def run_scan_command(args: argparse.Namespace) -> int:
             "1_completion_status": "status=completed（途中停止せず最後まで完走済み）",
             "2_budget_stop_check": f"上限 ${args.max_budget:.2f} に対し追加API課金 $0.00（予算到達による途中打ち切りなし）",
             "3_coverage_and_blind_spots": (
-                f"組織内の {files_scanned} ファイル（推定API窓口 {topology.api_endpoints_estimated} 箇所、監査カバレッジ率 {scorecard.audit_coverage_percent}%）を検査済み。"
+                f"組織内の {files_scanned} ファイル（推定API窓口 {topology.api_endpoints_estimated} 箇所、カバレッジ率は算出不可）を検査済み。"
                 "ただし本番稼働DB上の実権限ロール（管理者 vs 一般利用者）やクラウドIAM設定は未検証のため、"
                 "「100点でも未検証領域の動的テストが必要」な点に留意してください。"
             ),
@@ -1937,7 +2196,7 @@ def run_scan_command(args: argparse.Namespace) -> int:
     if scorecard.cap_applied:
         print(f"  ⚠️  キャップ適用: {scorecard.cap_reason}")
     print(f"  - 検査ファイル数: {metadata.files_scanned} (誤検知除外: {metadata.false_positives_filtered} 件)")
-    print(f"  - 確定した弱点: {metadata.verified_vulnerabilities_count} 件")
+    print(f"  - パターン一致した弱点候補: {metadata.pattern_match_count} 件")
     print(f"  - 保守提案書: {run_dir / 'maintenance_proposal.md'}")
     print(f"  - レポート表示: python3 {Path(__file__).name} view --open")
 
@@ -2082,6 +2341,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-host-audit",
         action="store_true",
         help="Windows PC / サーバー自体のファイアウォール・危険開放ポート監査も同時に実施する（営業現場診断向け）",
+    )
+    p_scan.add_argument(
+        "--with-external",
+        action="store_true",
+        help="gitleaks / semgrep が導入済みなら結果を取り込む（semgrepは既定でルール取得の外部通信あり）",
+    )
+    p_scan.add_argument(
+        "--semgrep-config",
+        default="auto",
+        help="semgrep のルール指定（ローカルのルールファイル/ディレクトリを指定すると外部通信なし）",
     )
     p_scan.add_argument(
         "--open",

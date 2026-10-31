@@ -1,7 +1,10 @@
 param(
     [string]$TargetPath = "",
     [string]$Mode = "standard",
-    [switch]$NonInteractive
+    [switch]$NonInteractive,
+    [switch]$ForceNative,
+    [switch]$NoOpen,
+    [switch]$IncludeHost
 )
 
 $ErrorActionPreference = "Continue"
@@ -56,6 +59,7 @@ function Invoke-NativePowerShellAudit {
 
     # 1. Windows ファイアウォール検査 (読み取り専用)
     try {
+        if (-not $doHost) { throw "host audit not consented" }
         $fwOut = (netsh advfirewall show allprofiles 2>$null) -join "`n"
         if ($fwOut -match "State\s+OFF|状態\s+オフ") {
             $findings += [PSCustomObject]@{
@@ -78,6 +82,7 @@ function Invoke-NativePowerShellAudit {
         1433 = "SQL Server"; 3306 = "MySQL"; 3389 = "RDP (リモートデスクトップ)"; 6379 = "Redis"
     }
     try {
+        if (-not $doHost) { throw "host audit not consented" }
         $netLines = netstat -an 2>$null
         $seenPorts = @{}
         foreach ($line in $netLines) {
@@ -198,7 +203,7 @@ function Invoke-NativePowerShellAudit {
 <div style="max-width:960px;margin:0 auto;">
   <div style="background:#1e293b;border-left:8px solid #38bdf8;padding:24px;border-radius:12px;margin-bottom:24px;display:flex;justify-content:space-between;align-items:center;">
     <div>
-      <h1 style="margin:0 0 8px 0;">🛡️ 包括的セキュリティ監査レポート (Windows Environment)</h1>
+      <h1 style="margin:0 0 8px 0;">🛡️ 簡易セキュリティ監査レポート (Windows PowerShell簡易版)</h1><p style="color:#fbbf24;margin:0 0 8px 0;">⚠️ 静的パターン検査の参考値です。一致なし＝安全ではなく、一致項目も手動確認が必要です。Python版とは検査範囲・点数が一致しません（Python版を推奨）。</p>
       <p style="margin:0;color:#cbd5e1;">検査対象: <code>$ScanPath</code> ｜ 検査ファイル数: $($files.Count) 件 ｜ $capReason</p>
     </div>
     <div style="text-align:center;background:#020617;padding:16px 28px;border-radius:12px;border:2px solid #38bdf8;">
@@ -216,10 +221,11 @@ function Invoke-NativePowerShellAudit {
     Write-Host ""
     Write-Host "[OK] Windows監査レポートを生成しました: $htmlPath" -ForegroundColor Green
     Write-Host "  🏆 総合セキュリティ得点: $finalScore / 100 点 (Grade $grade)" -ForegroundColor Cyan
-    Start-Process $htmlPath
+    if (-not $NoOpen) { Start-Process $htmlPath }
 }
 
-$pyCmd = Find-WorkingPython
+$pyCmd = if ($ForceNative) { $null } else { Find-WorkingPython }
+$doHost = $IncludeHost.IsPresent
 
 if (-not $NonInteractive -and [string]::IsNullOrWhiteSpace($TargetPath)) {
     Write-Host "実行したいメニュー番号を選んで Enter を押してください:" -ForegroundColor White
@@ -248,13 +254,20 @@ if ([string]::IsNullOrWhiteSpace($TargetPath)) {
     $TargetPath = $RepoRoot
 }
 
+if (-not $NonInteractive -and -not $doHost) {
+    Write-Host ""
+    Write-Host "このPC/サーバー自体の設定(Firewall・外部開放ポート)も診断しますか？" -ForegroundColor Yellow
+    Write-Host "※ 端末の管理者から書面(または電磁的記録)での事前同意がある場合のみ yes を入力してください。" -ForegroundColor Gray
+    $ans = Read-Host "yes / no (デフォルト: no)"
+    if ($ans -eq "yes") { $doHost = $true }
+}
+
 if ($pyCmd) {
-    Write-Host "[INFO] Pythonエンジン ($pyCmd) で 100点満点包括監査＋ホスト環境診断を実行します..." -ForegroundColor Green
-    if ($pyCmd -eq "py") {
-        & py -3 $RunnerPy scan --target "$TargetPath" --mode $Mode --include-host-audit --open
-    } else {
-        & $pyCmd $RunnerPy scan --target "$TargetPath" --mode $Mode --include-host-audit --open
-    }
+    Write-Host "[INFO] Pythonエンジン ($pyCmd) で静的パターン監査を実行します..." -ForegroundColor Green
+    $scanArgs = @("scan", "--target", "$TargetPath", "--mode", $Mode)
+    if ($doHost) { $scanArgs += "--include-host-audit" }
+    if (-not $NoOpen) { $scanArgs += "--open" }
+    if ($pyCmd -eq "py") { & py -3 $RunnerPy @scanArgs } else { & $pyCmd $RunnerPy @scanArgs }
 } else {
     Invoke-NativePowerShellAudit -ScanPath $TargetPath
 }

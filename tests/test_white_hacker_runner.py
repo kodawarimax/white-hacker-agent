@@ -80,7 +80,7 @@ def get_order(order_id: int, current_user=Depends(get_logged_in_user)):
             vulns_json = json.loads((latest_run / "vulnerabilities.json").read_text(encoding="utf-8"))
 
             self.assertEqual(run_json["status"], "completed")
-            self.assertEqual(run_json["verified_vulnerabilities_count"], 1)
+            self.assertEqual(run_json["pattern_match_count"], 1)
             # HIGH 1件（素点 100 - 12 = 88点 だが、HIGH残存キャップにより 69点 / Grade C になること）
             self.assertEqual(scorecard_data["scorecard"]["raw_score"], 88)
             self.assertEqual(scorecard_data["scorecard"]["final_score"], 69)

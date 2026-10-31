@@ -8,14 +8,43 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Run Unit & Sanitization Tests
-        run: python3 -m unittest discover -s tests -v
-      - name: Run Built-in Interactive Demo
-        run: python3 white_hacker_runner.py demo
+      - name: Unit tests and detection corpus (recall / false positives)
+        run: python -m unittest discover -s tests -v
+      - name: Built-in demo
+        run: python white_hacker_runner.py demo
+
+  windows-native-powershell:
+    # Python非依存の簡易PowerShell版を Windows 実機で実行し、レポートが生成されることを検証する
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create sample vulnerable app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force sample | Out-Null
+          Set-Content sample/web.config '<configuration><system.web><compilation debug="true" /></system.web></configuration>'
+          Set-Content sample/app.py 'cursor.execute(f"SELECT * FROM u WHERE n = {n}")'
+      - name: Run native PowerShell engine (Windows PowerShell 5.1)
+        shell: powershell
+        run: .\scripts\Run_Windows_Audit.ps1 -TargetPath sample -NonInteractive -ForceNative -NoOpen
+      - name: Assert report generated and findings detected
+        shell: pwsh
+        run: |
+          $r = Get-ChildItem strix_runs -Recurse -Filter report.html | Select-Object -First 1
+          if (-not $r) { Write-Error "report.html not generated"; exit 1 }
+          $txt = Get-Content $r.FullName -Raw -Encoding UTF8
+          if ($txt -notmatch "SQL" -or $txt -notmatch "デバッグ") { Write-Error "expected findings missing"; exit 1 }
+          Write-Host "OK: native PowerShell report verified"
+      - name: Run Python engine via the PowerShell launcher
+        shell: powershell
+        run: .\scripts\Run_Windows_Audit.ps1 -TargetPath sample -NonInteractive -NoOpen
