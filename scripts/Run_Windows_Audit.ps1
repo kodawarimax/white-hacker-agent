@@ -119,7 +119,8 @@ function Invoke-NativePowerShellAudit {
     }
 
     foreach ($f in $files) {
-        $lines = Get-Content -Path $f.FullName -ErrorAction SilentlyContinue
+        # 1行ファイルでも必ず配列として扱う（文字列のまま添字参照すると1文字目になり見逃す）
+        $lines = @(Get-Content -Path $f.FullName -ErrorAction SilentlyContinue)
         if (-not $lines) { continue }
         for ($i = 0; $i -lt $lines.Count; $i++) {
             $ln = [string]$lines[$i]
@@ -220,7 +221,7 @@ function Invoke-NativePowerShellAudit {
 
     Write-Host ""
     Write-Host "[OK] Windows監査レポートを生成しました: $htmlPath" -ForegroundColor Green
-    Write-Host "  🏆 総合セキュリティ得点: $finalScore / 100 点 (Grade $grade)" -ForegroundColor Cyan
+    Write-Host "  🏆 総合セキュリティ得点(参考値): $finalScore / 100 点 (Grade $grade) / 検査ファイル数: $($files.Count) / パターン一致: $($findings.Count) 件" -ForegroundColor Cyan
     if (-not $NoOpen) { Start-Process $htmlPath }
 }
 

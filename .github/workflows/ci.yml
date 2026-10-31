@@ -44,6 +44,7 @@ jobs:
           if (-not $r) { Write-Error "report.html not generated"; exit 1 }
           $txt = Get-Content $r.FullName -Raw -Encoding UTF8
           if ($txt -notmatch "SQL" -or $txt -notmatch "デバッグ") { Write-Error "expected findings missing"; exit 1 }
+          if ($txt -match "Grade S") { Write-Error "vulnerable sample must not score Grade S"; exit 1 }
           Write-Host "OK: native PowerShell report verified"
       - name: Run Python engine via the PowerShell launcher
         shell: powershell
