@@ -167,9 +167,9 @@ function Invoke-NativePowerShellAudit {
     }
 
     # スコア計算 (100点満点 + 致命的欠陥ハードキャップ)
-    $critCount = ($findings | Where-Object { $_.severity -eq "CRITICAL" }).Count
-    $highCount = ($findings | Where-Object { $_.severity -eq "HIGH" }).Count
-    $medCount  = ($findings | Where-Object { $_.severity -eq "MEDIUM" }).Count
+    $critCount = @($findings | Where-Object { $_.severity -eq "CRITICAL" }).Count
+    $highCount = @($findings | Where-Object { $_.severity -eq "HIGH" }).Count
+    $medCount = @($findings | Where-Object { $_.severity -eq "MEDIUM" }).Count
     $rawScore = [Math]::Max(0, 100 - ($critCount * 15) - ($highCount * 10) - ($medCount * 4))
     $finalScore = $rawScore
     $capReason = "キャップ適用なし"
