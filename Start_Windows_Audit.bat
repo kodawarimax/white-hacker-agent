@@ -1,10 +1,10 @@
 @echo off
-chcp 65001 > nul
+rem Display text is ASCII-only on purpose (cmd.exe parses this file before any codepage change).
 setlocal
 
 echo ============================================================================
-echo   AI White Hacker Agent - Windows クライアントPC / サーバー セキュリティ監査
-echo   (読み取り専用・外部送信ゼロ・100点満点監査レポート＆保守提案書自動生成)
+echo   AI White Hacker Agent - static pattern security audit (Windows)
+echo   Read-only. No data is sent externally. Report is created as HTML.
 echo ============================================================================
 echo.
 

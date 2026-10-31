@@ -202,6 +202,14 @@ def get_order(order_id: int, current_user=Depends(get_logged_in_user)):
         self.assertTrue((repo_root / "Start_Windows_Audit.bat").exists())
         self.assertTrue((repo_root / "scripts" / "Run_Windows_Audit.ps1").exists())
 
+    def test_windows_scripts_encoding_safe(self):
+        """Windows PowerShell 5.1 は BOM なし UTF-8 を ANSI と誤読して構文エラーになる（CIで実際に発生）。BOM必須。"""
+        repo_root = Path(__file__).resolve().parent.parent
+        ps1 = (repo_root / "scripts" / "Run_Windows_Audit.ps1").read_bytes()
+        self.assertTrue(ps1.startswith(b"\xef\xbb\xbf"), "Run_Windows_Audit.ps1 は UTF-8 BOM 付きで保存すること")
+        bat = (repo_root / "Start_Windows_Audit.bat").read_bytes()
+        bat.decode("ascii")  # .bat は ASCII のみ
+
     def test_opensource_sanitization_no_personal_paths(self):
         """公開用リポジトリ内に個人環境パス(/Users/等)が含まれていないこと"""
         repo_root = Path(__file__).resolve().parent.parent

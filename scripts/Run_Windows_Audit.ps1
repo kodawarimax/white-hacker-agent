@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$TargetPath = "",
     [string]$Mode = "standard",
     [switch]$NonInteractive,
