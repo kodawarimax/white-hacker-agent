@@ -154,6 +154,54 @@ def get_order(order_id: int, current_user=Depends(get_logged_in_user)):
             self.assertEqual(second_run["overall_score"], 100)
             self.assertEqual(second_run["overall_grade"], "S")
 
+    def test_windows_server_web_config_and_host_audit(self):
+        """Windows Server (IIS web.config / appsettings.json) の平文パスワード・デバッグ設定・ホスト監査の検証"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            web_config = tmp_path / "web.config"
+            runs_dir = tmp_path / "strix_runs"
+
+            web_config.write_text(
+                """<configuration>
+  <connectionStrings>
+    <add name="DefaultDb" connectionString="Server=myServer;Database=myDataBase;User Id=sa;Password=SuperSecretWinPass123;" />
+  </connectionStrings>
+  <system.web>
+    <compilation debug="true" targetFramework="4.8" />
+    <customErrors mode="Off" />
+  </system.web>
+</configuration>""",
+                encoding="utf-8",
+            )
+
+            rc = main(
+                [
+                    "scan",
+                    "--target",
+                    str(tmp_path),
+                    "--mode",
+                    "quick",
+                    "--include-host-audit",
+                    "--output-dir",
+                    str(runs_dir),
+                ]
+            )
+            self.assertEqual(rc, 0)
+            latest_run = sorted(runs_dir.iterdir())[-1]
+            vulns = json.loads((latest_run / "vulnerabilities.json").read_text(encoding="utf-8"))
+            scorecard = json.loads((latest_run / "audit_scorecard.json").read_text(encoding="utf-8"))["scorecard"]
+
+            titles = [v["title"] for v in vulns]
+            self.assertTrue(any("パスワード" in t for t in titles))
+            self.assertTrue(any("デバッグ" in t for t in titles))
+            # CRITICAL が含まれるため 49点 / Grade D にキャップされること
+            self.assertEqual(scorecard["final_score"], 49)
+            self.assertEqual(scorecard["grade"], "D")
+
+        repo_root = Path(__file__).resolve().parent.parent
+        self.assertTrue((repo_root / "Start_Windows_Audit.bat").exists())
+        self.assertTrue((repo_root / "scripts" / "Run_Windows_Audit.ps1").exists())
+
     def test_opensource_sanitization_no_personal_paths(self):
         """公開用リポジトリ内に個人環境パス(/Users/等)が含まれていないこと"""
         repo_root = Path(__file__).resolve().parent.parent

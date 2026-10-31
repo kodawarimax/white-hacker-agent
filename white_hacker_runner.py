@@ -29,7 +29,9 @@ import datetime as dt
 import html
 import json
 import os
+import platform
 import re
+import subprocess
 import sys
 import tempfile
 import urllib.parse
@@ -37,6 +39,28 @@ import webbrowser
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+
+def _ensure_utf8_stdio() -> None:
+    """Windows環境(CP932コンソール等)でも絵文字・日本語で文字化けやエラーが起きないようUTF-8へ再設定"""
+    for stream in (sys.stdout, sys.stderr):
+        reconf = getattr(stream, "reconfigure", None)
+        if callable(reconf):
+            try:
+                reconf(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+def _open_in_browser(html_file: Path) -> None:
+    """Windows(os.startfile) / macOS / Linux 対応のブラウザ自動起動"""
+    try:
+        if sys.platform == "win32" and hasattr(os, "startfile"):
+            os.startfile(str(html_file))  # type: ignore[attr-defined]
+        else:
+            webbrowser.open(html_file.as_uri())
+    except Exception:
+        pass
 
 
 ALLOWED_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
@@ -47,6 +71,8 @@ SKIP_DIRS = {
     ".next",
     "dist",
     "build",
+    "bin",
+    "obj",
     "__pycache__",
     ".venv",
     "venv",
@@ -67,6 +93,16 @@ SCAN_EXTENSIONS = {
     ".sql",
     ".toml",
     ".dockerfile",
+    ".cs",
+    ".vb",
+    ".cshtml",
+    ".config",
+    ".ps1",
+    ".bat",
+    ".cmd",
+    ".ini",
+    ".env",
+    ".php",
 }
 
 # 6大監査領域の標準配点（合計100点）
@@ -399,7 +435,7 @@ class WhiteHackerScanner:
             except OSError:
                 continue
 
-            rel_path = str(fpath.relative_to(root.parent if root.is_file() else root))
+            rel_path = str(fpath.relative_to(root.parent if root.is_file() else root)).replace("\\", "/")
             lines = content.splitlines()
 
             # ① アクセス制御・業務ロジック・認可 (access_control)
@@ -906,10 +942,50 @@ class WhiteHackerScanner:
         seq = start_seq
 
         cors_wildcard_re = re.compile(r"""(allow_origins\s*=\s*\[\s*['"]\*['"]\s*\]|Access-Control-Allow-Origin['"]?\s*[:,]\s*['"]\*['"])""")
-        debug_prod_re = re.compile(r"""(app\.run\([^)]*debug\s*=\s*True|DEBUG\s*=\s*True)""")
+        debug_prod_re = re.compile(
+            r"""(app\.run\([^)]*debug\s*=\s*True|DEBUG\s*=\s*True|<compilation\s+[^>]*debug\s*=\s*['"]true['"]|<customErrors\s+[^>]*mode\s*=\s*['"]Off['"])""",
+            re.IGNORECASE,
+        )
+        dotnet_conn_pw_re = re.compile(
+            r"""(Password\s*=\s*[^;"'\s]{4,}|Pwd\s*=\s*[^;"'\s]{4,})""",
+            re.IGNORECASE,
+        )
 
         for i, line in enumerate(lines):
-            if cors_wildcard_re.search(line):
+            if dotnet_conn_pw_re.search(line) and any(
+                k in rel_path.lower() for k in ("web.config", "appsettings", ".env", ".ini", ".bat", ".ps1")
+            ):
+                if "example" not in line.lower() and "placeholder" not in line.lower():
+                    self.candidates_inspected += 1
+                    results.append(
+                        self._make_finding(
+                            seq=seq,
+                            title="Windows/サーバー設定ファイル内の平文DBパスワード埋め込み",
+                            domain_key="secrets_data",
+                            role="API & Cloud Config Scanner (Windows/サーバー設定担当)",
+                            category="OWASP A02/A05: Plaintext Password in Server Config",
+                            severity="CRITICAL",
+                            sev_s=5,
+                            exp_s=5,
+                            blast_s=5,
+                            file_path=rel_path,
+                            line_number=i + 1,
+                            code_snippet="Connection string / script contains plaintext Password=[REDACTED]",
+                            what_happens=(
+                                "`web.config` や `appsettings.json`、バッチ/PowerShellスクリプト内にデータベース等の接続パスワードが平文で記載されており、"
+                                "ファイル共有やバックアップから認証情報が漏洩してサーバー・DB全体が乗っ取られる危険があります。"
+                            ),
+                            reproduction_steps=[
+                                f"1. `{rel_path}:{i + 1}` の接続文字列またはスクリプト内に平文の `Password=` / `Pwd=` が含まれていることを確認。"
+                            ],
+                            root_cause="サーバー設定ファイルやスクリプトへのパスワード直接記載。",
+                            remediation="Windows資格情報マネージャー、環境変数、またはAzure Key Vault / AWS Secrets Manager等の暗号化ストアへ移行してください。",
+                            patch_example="# 環境変数または暗号化ストアから取得\nConnectionStrings__Default = os.environ['DB_CONNECTION_STRING']",
+                        )
+                    )
+                    seq += 1
+
+            elif cors_wildcard_re.search(line):
                 self.candidates_inspected += 1
                 scope_text = self._window(lines, i, before=4, after=6)
                 if "allow_credentials=True" in scope_text or "credentials: true" in scope_text.lower():
@@ -1645,6 +1721,124 @@ def write_strix_compatible_run(
     return run_dir
 
 
+class HostPostureAuditor:
+    """
+    WindowsクライアントPC / Windows Server / Linux / macOS 対応の
+    読み取り専用ホスト環境セキュリティ監査（--include-host-audit 指定時に稼働）
+    """
+
+    HIGH_RISK_PORTS = {
+        21: ("FTP (平文ファイル転送)", "HIGH", 4, 4, 4),
+        23: ("Telnet (平文リモート操作)", "CRITICAL", 5, 5, 5),
+        445: ("SMB ファイル共有 (ランサムウェア感染経路)", "HIGH", 4, 5, 5),
+        1433: ("SQL Server (DB直接公開)", "HIGH", 4, 4, 5),
+        3306: ("MySQL (DB直接公開)", "HIGH", 4, 4, 5),
+        3389: ("RDP リモートデスクトップ (総当たり攻撃標的)", "HIGH", 4, 4, 5),
+        5432: ("PostgreSQL (DB直接公開)", "HIGH", 4, 4, 5),
+        6379: ("Redis (無認証メモリDB公開)", "CRITICAL", 5, 5, 5),
+    }
+
+    def audit_local_host(self, start_seq: int = 900) -> List[VulnerabilityFinding]:
+        findings: List[VulnerabilityFinding] = []
+        seq = start_seq
+        os_name = platform.system()
+
+        # 1. Windows ファイアウォール状態の確認 (Windows環境のみ・読み取り専用)
+        if os_name == "Windows":
+            try:
+                proc = subprocess.run(
+                    ["netsh", "advfirewall", "show", "allprofiles"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                out = proc.stdout or ""
+                if re.search(r"State\s+OFF|状態\s+オフ", out, re.IGNORECASE):
+                    findings.append(
+                        VulnerabilityFinding(
+                            id=f"WH-{seq:03d}",
+                            title="Windowsファイアウォールの無効化（外部からの不正通信素通りリスク）",
+                            domain_key="infra_supply_chain",
+                            role="API & Cloud Config Scanner (Windows端末・サーバー防衛担当)",
+                            category="Host Security: Windows Firewall Disabled",
+                            severity="HIGH",
+                            severity_score=4,
+                            exploitability_score=4,
+                            blast_radius_score=5,
+                            risk_priority_score=80,
+                            verification_status="VERIFIED_REPRODUCIBLE",
+                            file_path="Windows_OS/Firewall_Profile",
+                            line_number=1,
+                            code_snippet="netsh advfirewall show allprofiles -> State OFF",
+                            what_happens="Windowsファイアウォールがオフになっているプロファイルがあり、社内LANや公衆Wi-Fi経由でのウイルス感染・不正侵入を遮断できません。",
+                            reproduction_steps=[
+                                "1. `netsh advfirewall show allprofiles` を実行し、State (状態) が OFF (オフ) のプロファイルが存在することを確認。"
+                            ],
+                            root_cause="Windowsファイアウォール設定が意図せず無効化されている。",
+                            remediation="すべてのプロファイル（ドメイン・プライベート・パブリック）でWindowsファイアウォールを有効化してください。",
+                            patch_example="netsh advfirewall set allprofiles state on",
+                        )
+                    )
+                    seq += 1
+            except Exception:
+                pass
+
+        # 2. 全インターフェース(0.0.0.0)で待ち受けている危険ポートの確認 (読み取り専用 netstat)
+        try:
+            proc = subprocess.run(
+                ["netstat", "-an"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            net_out = proc.stdout or ""
+            exposed_ports = set()
+            for line in net_out.splitlines():
+                if "LISTEN" not in line.upper():
+                    continue
+                m = re.search(r"(?:0\.0\.0\.0|\*|\[::\]):(\d+)\s", line)
+                if m:
+                    port_num = int(m.group(1))
+                    if port_num in self.HIGH_RISK_PORTS and port_num not in exposed_ports:
+                        exposed_ports.add(port_num)
+                        pname, sev, s_score, e_score, b_score = self.HIGH_RISK_PORTS[port_num]
+                        findings.append(
+                            VulnerabilityFinding(
+                                id=f"WH-{seq:03d}",
+                                title=f"危険ポートの外部全体開放（Port {port_num}: {pname}）",
+                                domain_key="infra_supply_chain",
+                                role="API & Cloud Config Scanner (ネットワーク・サーバー監査担当)",
+                                category=f"Host Security: Exposed Service Port {port_num}",
+                                severity=sev,
+                                severity_score=s_score,
+                                exploitability_score=e_score,
+                                blast_radius_score=b_score,
+                                risk_priority_score=s_score * e_score * b_score,
+                                verification_status="VERIFIED_REPRODUCIBLE",
+                                file_path=f"{os_name}_Host/Network_Port_{port_num}",
+                                line_number=port_num,
+                                code_snippet=line.strip(),
+                                what_happens=(
+                                    f"ポート {port_num} ({pname}) が `0.0.0.0`（外部ネットワーク全体）に対して待ち受け状態になっており、"
+                                    "ランサムウェア感染やパスワード総当たり攻撃の直接的な侵入窓口になります。"
+                                ),
+                                reproduction_steps=[
+                                    f"1. `netstat -an` で `0.0.0.0:{port_num}` が LISTEN 状態であることを確認。"
+                                ],
+                                root_cause="サービスがローカル限定(127.0.0.1)ではなく全ネットワーク向けにバインドされている。",
+                                remediation="不要な場合はサービスを停止し、必要な場合は `127.0.0.1` 限定バインドまたはVPN・ファイアウォールで接続元IPを制限してください。",
+                                patch_example=f"# ファイアウォールでポート {port_num} の外部直接アクセスを遮断",
+                            )
+                        )
+                        seq += 1
+        except Exception:
+            pass
+
+        return findings
+
+
 def run_scan_command(args: argparse.Namespace) -> int:
     started = dt.datetime.now(dt.timezone.utc).isoformat()
     ok, target_type, msg_or_path = validate_target_scope(
@@ -1681,6 +1875,11 @@ def run_scan_command(args: argparse.Namespace) -> int:
             trust_boundaries=["External HTTP Client ➔ Staging Server"],
         )
 
+    if getattr(args, "include_host_audit", False):
+        host_findings = HostPostureAuditor().audit_local_host(start_seq=len(findings) + 1)
+        findings.extend(host_findings)
+        topology.tech_stack_summary.append(f"Host OS ({platform.system()})")
+
     scorecard = ComprehensiveAuditScorer().evaluate(
         findings=findings,
         topology=topology,
@@ -1690,7 +1889,7 @@ def run_scan_command(args: argparse.Namespace) -> int:
     )
 
     completed = dt.datetime.now(dt.timezone.utc).isoformat()
-    run_id = dt.datetime.now().strftime("run_%Y%m%d_%H%M%S_%f")[:22]
+    run_id = dt.datetime.now().strftime("run_%Y%m%d_%H%M%S_%f")
 
     metadata = RunMetadata(
         run_id=run_id,
@@ -1714,8 +1913,8 @@ def run_scan_command(args: argparse.Namespace) -> int:
             "access_control_idor": "checked (25pts: route handler ownership & RBAC analysis)",
             "auth_session": "checked (15pts: JWT signature & session cookie verification)",
             "input_injection_xss": "checked (20pts: SQLi, Command Injection, XSS, SSRF)",
-            "secrets_and_data": "checked (15pts: hardcoded secrets, NEXT_PUBLIC_ leaks, .env hygiene)",
-            "infra_supply_chain": "checked (15pts: CORS, debug flags, lockfile & CI hygiene)",
+            "secrets_and_data": "checked (15pts: hardcoded secrets, NEXT_PUBLIC_/web.config leaks, .env hygiene)",
+            "infra_supply_chain": "checked (15pts: CORS, debug flags, lockfile & host port/firewall hygiene)",
             "ai_governance_resilience": "checked (10pts: dynamic eval/exec guard, silent failure check)",
             "untested_blind_spots": "マルチテナント実DB環境での管理者権限昇格・外部決済Webhook署名・本番クラウドIAMポリシーは別途動的検証が必要",
         },
@@ -1739,7 +1938,11 @@ def run_scan_command(args: argparse.Namespace) -> int:
         print(f"  ⚠️  キャップ適用: {scorecard.cap_reason}")
     print(f"  - 検査ファイル数: {metadata.files_scanned} (誤検知除外: {metadata.false_positives_filtered} 件)")
     print(f"  - 確定した弱点: {metadata.verified_vulnerabilities_count} 件")
-    print(f"  - レポート表示: python3 {Path(__file__).name} view (または --open でブラウザ表示)")
+    print(f"  - 保守提案書: {run_dir / 'maintenance_proposal.md'}")
+    print(f"  - レポート表示: python3 {Path(__file__).name} view --open")
+
+    if getattr(args, "open", False) and (run_dir / "report.html").exists():
+        _open_in_browser(run_dir / "report.html")
     return 0
 
 
@@ -1763,7 +1966,7 @@ def run_view_command(args: argparse.Namespace) -> int:
 
     print(summary_file.read_text(encoding="utf-8"))
     if getattr(args, "open", False) and html_file.exists():
-        webbrowser.open(html_file.as_uri())
+        _open_in_browser(html_file)
     return 0
 
 
@@ -1808,6 +2011,8 @@ def get_order(order_id: int, current_user=Depends(get_logged_in_user)):
             max_budget=5.0,
             allow_staging_host=[],
             output_dir=str(out_dir),
+            include_host_audit=False,
+            open=False,
         )
         run_scan_command(scan_args)
 
@@ -1847,7 +2052,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_scan = sub.add_parser("scan", help="組織・アプリのフォルダを包括監査して100点満点レポートを出力する")
+    p_scan = sub.add_parser("scan", help="組織・アプリのフォルダ（およびPC/サーバー環境）を包括監査して100点満点レポートを出力する")
     p_scan.add_argument(
         "--target",
         "-t",
@@ -1874,6 +2079,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="事前許可を得た自身のステージング環境のホスト名を追加許可する",
     )
     p_scan.add_argument(
+        "--include-host-audit",
+        action="store_true",
+        help="Windows PC / サーバー自体のファイアウォール・危険開放ポート監査も同時に実施する（営業現場診断向け）",
+    )
+    p_scan.add_argument(
+        "--open",
+        action="store_true",
+        help="スキャン完了と同時にブラウザでビジュアル監査レポート(report.html)を自動表示する",
+    )
+    p_scan.add_argument(
         "--output-dir",
         default=default_out,
         help="結果出力先フォルダ (デフォルト: ./strix_runs)",
@@ -1894,6 +2109,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    _ensure_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "scan":

@@ -35,9 +35,21 @@ AIコーディング（バイブコーディング）で誰でも一瞬でWebア
 
 ---
 
-## 🚀 1分で始める使い方
+## 🚀 1分で始める使い方（Windows / Mac / Linux 完全対応）
 
-### Step 1: インストール（1行コマンド）
+### 💻 パターンA: 営業担当者が Windows クライアントPC や Windows Server で1クリック診断する場合
+
+**Pythonが入っていない企業のWindows PCやWindows Serverでもそのまま動きます！**（Pythonがあればフルエンジン、無ければWindows標準のPowerShellネイティブ監査エンジンに自動切り替え）
+
+1. ZIPをダウンロード（または `git clone`）して展開します。
+2. フォルダ内の **`Start_Windows_Audit.bat` をダブルクリック**します（または診断したいフォルダを `Start_Windows_Audit.bat` のアイコンへドラッグ＆ドロップ）。
+3. 画面のメニューで `[1] フォルダを選択して診断` または `[2] このWindows PC / サーバー全体(Firewall・危険開放ポート・IIS Web.config等)を診断` を選ぶと、スキャン完了と同時にブラウザで **100点満点のビジュアル監査レポート（`report.html`）** と **継続保守提案書（`maintenance_proposal.md`）** が開きます。
+
+---
+
+### 🛠️ パターンB: ターミナル・開発環境から使う場合
+
+#### Step 1: インストール（1行コマンド）
 
 ```bash
 git clone https://github.com/kodawarimax/white-hacker-agent.git
@@ -45,7 +57,7 @@ cd white-hacker-agent
 bash install.sh
 ```
 
-### Step 2: まずは「3秒体験デモ（69点 ➔ 修正 ➔ 100点）」を動かしてみる
+#### Step 2: まずは「3秒体験デモ（69点 ➔ 修正 ➔ 100点）」を動かしてみる
 
 自分のアプリを用意する前に、**「他人の注文が見えてしまう弱点を見つけて（69点 / Grade C）、直して、もう一度検査して 100点（Grade S）になるまで」** を自動で体験できます：
 
@@ -53,14 +65,11 @@ bash install.sh
 python3 white_hacker_runner.py demo
 ```
 
-### Step 3: 組織・自分のアプリフォルダを包括監査する
+#### Step 3: 組織・アプリフォルダ＋PC/サーバー環境を包括監査する
 
 ```bash
-# 対象フォルダを指定して100点満点監査＋保守提案書を生成（quick / standard / deep）
-python3 white_hacker_runner.py scan --target /path/to/your-app --mode standard
-
-# 結果をターミナル＆ブラウザ（ビジュアル監査ダッシュボード）で開く
-python3 white_hacker_runner.py view --open
+# 対象フォルダ＋ホスト環境（Firewall/危険ポート）を100点満点監査し、ブラウザでレポートを自動表示
+python3 white_hacker_runner.py scan --target /path/to/your-app --include-host-audit --open
 ```
 
 ---
