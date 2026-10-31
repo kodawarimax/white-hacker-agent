@@ -90,12 +90,28 @@ def get_order(order_id: int, current_user=Depends(get_logged_in_user)):
 
             self.assertEqual(vulns_json[0]["id"], "WH-001")
             self.assertIn("IDOR", vulns_json[0]["title"])
+            self.assertIn("オートロック", vulns_json[0]["plain_explanation"])
+            self.assertIn("個人情報保護委員会", vulns_json[0]["estimated_loss_scenario"])
             self.assertTrue((latest_run / "findings" / "WH-001.md").exists())
             self.assertTrue((latest_run / "report.html").exists())
             self.assertTrue((latest_run / "maintenance_proposal.md").exists())
 
+            finding_md = (latest_run / "findings" / "WH-001.md").read_text(encoding="utf-8")
+            self.assertIn("IT専門用語なしで言うと", finding_md)
+            self.assertIn("なぜ経営・事業に関わるのか", finding_md)
+            self.assertIn("想定される具体的な損失・被害シナリオ", finding_md)
+
+            summary_text = (latest_run / "summary.md").read_text(encoding="utf-8")
+            self.assertIn("経営者・非IT部門向けエグゼクティブ解説", summary_text)
+            self.assertIn("直接的な金銭流出・営業停止損失", summary_text)
+
+            html_text = (latest_run / "report.html").read_text(encoding="utf-8")
+            self.assertIn("なぜ情報漏洩リスクが「経営問題」に直結し、どんな損失につながるのか？", html_text)
+            self.assertIn("IT専門用語なしで言うと？（たとえ話）", html_text)
+
             proposal_text = (latest_run / "maintenance_proposal.md").read_text(encoding="utf-8")
             self.assertIn("サイバーセキュリティ継続保守プログラム", proposal_text)
+            self.assertIn("なぜこの情報漏洩リスクが「経営問題」に直結し", proposal_text)
             self.assertIn("69 / 100 点", proposal_text)
 
             # 修正後: 100点 / Grade S になること

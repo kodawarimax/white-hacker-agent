@@ -140,6 +140,90 @@ AUDIT_DOMAINS_SPEC: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _derive_executive_business_impact(
+    category: str, domain_key: str, severity: str, title: str
+) -> Tuple[str, str, str]:
+    """
+    IT専門知識がない経営者・事業責任者・営業担当者にも直感的に伝わるよう、
+    各脆弱性を「①専門用語なしのたとえ話」「②なぜ経営・事業に関わるのか」「③想定される具体的損失シナリオ」へ翻訳する。
+    ※損失規模は保有データ件数や取引条件に依存する業界一般的なリスク試算であり、確定損害額を保証するものではない。
+    """
+    cat_u = (category + " " + title).upper()
+
+    if "IDOR" in cat_u or "BOLA" in cat_u or "BROKEN ACCESS CONTROL" in cat_u:
+        return (
+            "マンションのオートロック（ログイン画面）は通過させておきながら、各部屋のドアに鍵がかかっていない状態です。画面のURLや注文番号を『1001』から『1002』に書き換えるだけで、赤の他人の注文履歴・請求書・個人情報がそのまま見えてしまいます。",
+            "特別なハッキングツールを使わなくても、一般的なブラウザ操作だけで他人の顧客データを覗き見できるため、最も発覚・悪用されやすい弱点です。顧客からの指摘やSNSでの拡散により、即日サービス停止と信用失墜に直結します。",
+            "①個人情報保護委員会への法定報告および全対象顧客への個別謝罪・通知対応、②原因調査（デジタルフォレンジック）とシステム緊急改修期間中の営業停止損失、③法人取引先からのセキュリティ基準不適合による契約解除・取引停止。",
+        )
+    if "FUNCTION LEVEL" in cat_u or "管理者エンドポイント" in title:
+        return (
+            "社員証の確認をせずに『関係者以外立入禁止』の社長室や金庫室のドアが開いてしまう状態です。一般のお客様でも、管理画面のアドレス（URL）さえ推測できれば、社員・管理者専用の操作（全顧客データの閲覧や削除など）を実行できてしまいます。",
+            "一般利用者アカウントからシステム全体の管理権限を奪われるため、顧客名簿の丸ごと持ち出しや不正返金・設定破壊など、事業の継続そのものを脅かす重大インシデントに直結します。",
+            "①管理機能悪用による全顧客データの漏洩・改ざん被害、②不正操作の範囲特定とシステム復旧に伴う長期サービス停止、③安全管理措置義務違反による行政指導および主要取引先からの契約打ち切り。",
+        )
+    if "JWT" in cat_u or "IDENTIFICATION AND AUTHENTICATION" in cat_u:
+        return (
+            "入館証の『偽造防止スタンプ（署名）』を警備員が確認していない状態です。来訪者が自分で紙に『社長』『A様』と書き換えた偽の入館証を見せるだけで、パスワードを知らなくても本人確認を素通りしてしまいます。",
+            "パスワードを盗まなくても、あらゆる顧客やシステム管理者へ100%なりすましが可能になります。決済・契約・機密データを扱うサービスでは、全アカウント乗っ取りに等しい致命的な経営リスクです。",
+            "①全顧客・管理者アカウントの不正乗っ取りリスクによるサービス全面停止、②全ユーザーへの認証強制リセットと公表・謝罪対応、③不正ログインを通じた不正決済・ポイントや資産の不正引き出しによる直接的な金銭被害。",
+        )
+    if "COOKIE" in cat_u or "HTTPONLY" in cat_u:
+        return (
+            "ログイン中の『通行証（Cookie）』を、画面上のプログラムから誰でも覗き見できるポケットに入れている状態です。もし画面に悪質なスクリプトが紛れ込むと、通行証をそのまま抜き取られてしまいます。",
+            "画面側の小さな不具合と組み合わさった瞬間に、利用中の顧客アカウントが乗っ取られる踏み台になります。金融・EC・B2B SaaSのセキュリティ審査で必ず指摘される項目です。",
+            "①顧客アカウントの乗っ取り被害およびカスタマーサポート・補償対応コストの発生、②大手取引先のセキュリティチェックシート（委託先審査）での不合格による商談失注。",
+        )
+    if "SQL" in cat_u:
+        return (
+            "倉庫の係員への注文書に『商品Aを1つください。あと倉庫にある全顧客の名簿も全部箱に入れて出してください』と書き足すと、係員が疑問を持たずに全顧客データを差し出してしまう状態です。",
+            "たった1つの検索窓や入力欄の弱点から、データベース内の全顧客情報・取引履歴・認証情報が丸ごと抜き取られる、あるいは全データが消去される『一発廃業級』の最大級リスクです。",
+            "①全件規模の個人情報漏洩による記者会見・個人情報保護委員会への報告・本人通知費用、②外部専門機関によるフォレンジック調査費用（数百万円〜数千万円規模）と数週間のサービス停止損失、③カード情報等が含まれる場合の決済加盟店契約の停止・損害賠償負担。",
+        )
+    if "COMMAND INJECTION" in cat_u or "OSコマンド" in title:
+        return (
+            "Webサイトの入力欄から、裏側で動いているサーバー本体（会社のコンピュータそのもの）に『このファイルを消せ』『外部へ全データを送信しろ』という直接命令を送り込めてしまう状態です。",
+            "Webアプリだけでなくサーバー自体を完全に支配（乗っ取り）されるため、社内ネットワークへの侵入拡大、ランサムウェア感染、さらには自社サーバーが他社へのサイバー攻撃の踏み台（加害者）にされる重大な経営リスクです。",
+            "①サーバー完全乗っ取り・ランサムウェア感染による長期の事業停止、②自社サーバーが他社攻撃の踏み台に悪用されたことによる対外的な損害賠償・信用失墜、③インフラ全面再構築と専門調査にかかる高額費用。",
+        )
+    if "XSS" in cat_u or "CROSS-SITE SCRIPTING" in cat_u:
+        return (
+            "自社のWeb画面に『そのページを開いた人のブラウザ上で勝手に不正操作を行う透明な罠』を仕掛けられる状態です。ページを開いた他のお客様や社内スタッフの画面上で、勝手に情報送信や操作が行われます。",
+            "自社の正規サイトが『訪れた顧客に被害を与える媒介サイト』になってしまうため、顧客からの信頼喪失やブランド毀損、管理画面で発火した場合の社内管理者権限の乗っ取りに直結します。",
+            "①利用顧客のセッション乗っ取りや偽決済画面への誘導による被害補償、②『危ないサイト』としての悪評拡散・ブラウザ警告表示による売上・CVRの急落。",
+        )
+    if "SSRF" in cat_u:
+        return (
+            "外部の人が入れないはずの『社内専用エリア』に、社内の受付ロボットを使って代わりに機密書類の写真を撮ってこさせるような手口です。サーバー自身に社内ネットワークやクラウドの裏口へアクセスさせて秘密情報を盗み出します。",
+            "外からは見えないはずの社内管理システムや、クラウド（AWS/GCP等）の最高権限キーが抜き取られ、クラウド環境全体が乗っ取られる危険があります。",
+            "①クラウド管理権限の奪取による全システム・全データベースの流出、②社内専用ネットワークへの不正侵入による機密情報の漏洩と全面的なインフラ再構築コスト。",
+        )
+    if any(k in cat_u for k in ("SECRET", "PASSWORD", "CREDENTIAL", "GITLEAKS", "秘密鍵", "パスワード")):
+        return (
+            "会社の金庫の暗証番号や法人クレジットカード番号を、社外の人も見られるパンフレットやプログラムの余白にマジックで直接書き込んでいる状態です。",
+            "業務委託先、退職者、あるいはWebブラウザの『ソース表示』を開いた一般利用者から、データベースの鍵やAI/クラウドのAPIキーをそのまま抜き取られます。漏洩から数分以内に世界中の自動ボットに悪用される即効性の高い経営リスクです。",
+            "①AI・クラウドAPIキーの不正利用による一晩で数百万円規模の海外不正課金（高額請求被害）、②DBパスワード流出による全顧客データの無断持ち出し、③全システムの鍵の緊急総入れ替えに伴うシステム停止。",
+        )
+    if any(k in cat_u for k in ("FIREWALL", "EXPOSED", "PORT", "ファイアウォール", "危険ポート")):
+        return (
+            "オフィスの正面玄関や裏口の鍵を開けっ放しにし、泥棒が24時間いつでも外からドアノブをガチャガチャ試せる（パスワード総当たり攻撃やウイルス侵入ができる）状態です。",
+            "Windows端末やサーバーがランサムウェア（身代金要求ウイルス）に感染する最大の原因です。1台のPCやサーバーの感染から社内LAN全体のファイルが暗号化され、全社の業務・出荷・請求がストップする経営危機に直結します。",
+            "①ランサムウェア感染による全社業務・工場・店舗の停止（数日〜数ヶ月の売上喪失）、②暗号化された業務データの復旧・フォレンジック調査対応費用（数百万円〜数千万円）、③取引先への納期遅延・サプライチェーンへの感染拡大による巨額の信用失墜。",
+        )
+    if "ARBITRARY CODE EXECUTION" in cat_u or "EVAL" in cat_u:
+        return (
+            "外部の入力やAIが生成した文章を、安全確認せずにそのまま『会社のサーバーへの直接プログラム命令』として実行してしまう状態です。",
+            "悪意ある入力1つでサーバー全体が乗っ取られ、全データの流出やシステム破壊が可能になるため、そのまま本番稼働させてはならない致命的リスクです。",
+            "①サーバー完全乗っ取りによる情報漏洩とサービス全面停止、②AI機能の悪用（プロンプトインジェクション経由のシステム侵害）による事業継続不能とサービス閉鎖。",
+        )
+
+    return (
+        "建物の設計図や防犯カメラの死角リストを壁に貼り出していたり（デバッグ情報の露出）、警報ベルの電源を切っている（エラーの握り潰し・過剰な通信許可）状態です。",
+        "単独ですぐに情報漏洩が起きなくても、攻撃者にシステム内部の弱点（ヒント）を教えたり、不正アクセスを受けていることに何ヶ月も気づけなくなる（被害を何倍にも拡大させる）組織管理上の弱点です。",
+        "①不正侵入の発見遅延による被害範囲・調査費用の数倍化、②大手取引先や金融機関のセキュリティ監査（ISMS/Pマーク/委託先審査）での減点・取引見送り。",
+    )
+
+
 @dataclass
 class VulnerabilityFinding:
     id: str
@@ -161,6 +245,21 @@ class VulnerabilityFinding:
     root_cause: str
     remediation: str
     patch_example: str
+    plain_explanation: str = ""
+    management_impact: str = ""
+    estimated_loss_scenario: str = ""
+
+    def __post_init__(self) -> None:
+        if not (self.plain_explanation and self.management_impact and self.estimated_loss_scenario):
+            plain, mgmt, loss = _derive_executive_business_impact(
+                self.category, self.domain_key, self.severity, self.title
+            )
+            if not self.plain_explanation:
+                self.plain_explanation = plain
+            if not self.management_impact:
+                self.management_impact = mgmt
+            if not self.estimated_loss_scenario:
+                self.estimated_loss_scenario = loss
 
 
 @dataclass
@@ -1422,7 +1521,12 @@ def _build_maintenance_proposal_md(
     else:
         recommended_plan = "Light（定期ヘルスチェック＆スコア維持プラン）"
 
-    urgent_items = [f"- `[{f.id}]` **{f.title}** (`{f.file_path}:{f.line_number}` / 重要度: {f.severity})" for f in findings[:5]]
+    urgent_items = [
+        f"- `[{f.id}]` **{f.title}** (`{f.file_path}:{f.line_number}` / 重要度: {f.severity})\n"
+        f"  - 💡 **専門用語なしで言うと**: {f.plain_explanation}\n"
+        f"  - 📉 **想定される経営損失**: {f.estimated_loss_scenario}"
+        for f in findings[:5]
+    ]
     urgent_list_md = "\n".join(urgent_items) if urgent_items else "- 初期診断における重大な未解決ホールはありません（高水準の維持・監視フェーズへ移行可能）。"
 
     proposal_md = f"""# 🛡️ サイバーセキュリティ継続保守プログラム ご提案書
@@ -1431,6 +1535,20 @@ def _build_maintenance_proposal_md(
 - **初回監査実施日 / 実行ID**: `{metadata.completed_at[:10]}` (`{metadata.run_id}`)
 - **現在の総合セキュリティ得点**: **{scorecard.final_score} / 100 点（Grade `{scorecard.grade}`）**
 - **推奨保守プラン**: **{recommended_plan}**
+
+---
+
+## 0. 💼 経営者・事業責任者様へ：なぜこの情報漏洩リスクが「経営問題」に直結し、どのような損失につながるのか？
+
+セキュリティの弱点は「IT担当者だけの技術的な宿題」ではなく、**1回の事故で会社のキャッシュフロー・法的責任・取引口座を同時に失いかねない経営リスク**です。
+
+| 経営リスクの3大分類 | ITがわからない方向けの具体例（何が起きるか） | 想定される具体的な損失・被害（業界一般的な試算・参考値） |
+| :--- | :--- | :--- |
+| **① 直接的な金銭流出・営業停止損失** | プログラムに書かれた鍵（APIキーやパスワード）を盗まれ、海外からAIやクラウドを勝手に使われたり、身代金ウイルス（ランサムウェア）で社内ファイルがすべてロックされます。 | ・クラウド/AIの不正利用による**一晩で数百万円規模の突発的な不正課金**<br>・原因調査（専門フォレンジック調査）に**数百万円〜1,000万円超の調査費用**<br>・システム停止期間中の**売上機会損失・復旧人件費** |
+| **② 法的義務・行政処分・賠償責任** | 注文番号の書き換え（IDOR）やデータベース抜き出し（SQL注入）により、お客様の氏名・住所・履歴・決済関連情報が外部へ流出します。 | ・**個人情報保護法に基づく国（個人情報保護委員会）への報告義務・全対象者への通知義務**<br>・被害顧客への見舞金・お詫び状送付・専用コールセンター設置費用<br>・安全管理措置義務違反による行政指導・社名公表 |
+| **③ 取引停止・信用失墜（サプライチェーン排除）** | 「あの会社は顧客データを漏らした」「セキュリティ管理が甘い」と取引先や金融機関・決済会社に判断されます。 | ・**大手取引先・親会社からの委託契約解除・新規商談の即時凍結**<br>・クレジットカード決済等の加盟店審査停止<br>・採用難化および企業ブランドの長期毀損 |
+
+> ※上記の損失シナリオは国内外のセキュリティインシデント事例に基づく一般的なリスク試算であり、実際の損害額は保有データ件数・事業規模・契約条件により異なります。
 
 ---
 
@@ -1535,12 +1653,17 @@ def _build_html_report(
                 <span class="risk-pill">3軸リスク値: {f.risk_priority_score} / 125</span>
               </div>
               <p class="meta"><strong>監査領域:</strong> {html.escape(f.domain_key)} ｜ <strong>担当AI:</strong> {html.escape(f.role)} ｜ <strong>場所:</strong> <code>{html.escape(f.file_path)}:{f.line_number}</code></p>
+              <div class="exec-box">
+                <p style="margin:0 0 8px 0;"><strong>💡 IT専門用語なしで言うと？（たとえ話）:</strong><br>{html.escape(f.plain_explanation)}</p>
+                <p style="margin:0 0 8px 0;"><strong>💼 なぜ経営・事業に関わるのか？:</strong><br>{html.escape(f.management_impact)}</p>
+                <p style="margin:0;"><strong>📉 放置した場合に想定される具体的な損失・被害シナリオ:</strong><br>{html.escape(f.estimated_loss_scenario)}</p>
+              </div>
               <div class="section">
-                <h4>1. 何が起きるか（業務・組織への影響）</h4>
+                <h4>1. 技術的な現象（何が起きるか）</h4>
                 <p>{html.escape(f.what_happens)}</p>
               </div>
               <div class="section">
-                <h4>2. どうやって確かめたか（再現手順）</h4>
+                <h4>2. どうやって確かめたか（確認手順）</h4>
                 <ul>{steps_li}</ul>
                 <pre><code>{html.escape(f.code_snippet)}</code></pre>
               </div>
@@ -1594,6 +1717,7 @@ def _build_html_report(
   .risk-pill {{ background: #334155; color: #f8fafc; font-size: 12px; padding: 4px 10px; border-radius: 999px; font-weight: 600; }}
   .vuln-id {{ color: #38bdf8; font-family: monospace; font-weight: 700; }}
   .meta {{ color: #cbd5e1; font-size: 13px; }}
+  .exec-box {{ background: #1e1b4b; border-left: 4px solid #818cf8; padding: 14px 16px; border-radius: 8px; margin: 12px 0; font-size: 14px; color: #e0e7ff; }}
   .section h4 {{ margin: 14px 0 6px 0; color: #38bdf8; font-size: 15px; }}
   pre {{ background: #020617; padding: 12px; border-radius: 8px; overflow-x: auto; border: 1px solid #1e293b; }}
   code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; color: #e2e8f0; }}
@@ -1619,6 +1743,18 @@ def _build_html_report(
 
   {cap_banner}
   <div class="cap-alert" style="background:#422006;border-color:#f59e0b;color:#fde68a;">⚠️ 本スコアは静的パターン検査（正規表現）の<strong>参考値</strong>です。一致なし＝安全ではなく、一致した項目も手動確認が必要です。ペネトレーションテスト・専門家レビューの代替ではありません。</div>
+
+  <div class="panel" style="margin-bottom:24px;border-color:#818cf8;background:#1e1b4b;">
+    <h2 style="color:#a5b4fc;margin-top:0;">💼 経営者・非IT部門向け解説：なぜ情報漏洩リスクが「経営問題」に直結し、どんな損失につながるのか？</h2>
+    <p style="font-size:14px;color:#e0e7ff;margin:0 0 10px 0;">
+      セキュリティの弱点は「IT担当者だけの技術的な宿題」ではなく、放置すると<strong>①突発的な金銭流出・営業停止、②法律上の報告義務・行政処分、③取引先からの契約解除</strong>に直結する経営リスクです（※被害規模は保有データ件数や事業規模により異なります）。
+    </p>
+    <ul style="font-size:13px;color:#cbd5e1;margin:0;padding-left:20px;">
+      <li><strong>💰 直接的な金銭損失・不正課金・調査費用:</strong> パスワードやAPIキーの流出による<strong>一晩で数百万円規模のクラウド/AI不正利用請求</strong>、ランサムウェア感染時の業務停止損失、および外部専門機関による原因調査（フォレンジック調査：数百万円〜1,000万円超）。</li>
+      <li><strong>⚖️ 法的・行政上の責任（個人情報保護法）:</strong> 顧客データの漏洩発生時における<strong>国（個人情報保護委員会）への法定報告・全対象顧客への個別通知義務</strong>、見舞金・お詫び対応、および安全管理措置不備による社名公表・行政指導。</li>
+      <li><strong>🤝 取引停止・信用の失墜（サプライチェーン排除）:</strong> 大手取引先・金融機関・決済代行会社のセキュリティ審査不適合による<strong>既存取引の契約解除・新規商談の失注・カード決済加盟店停止</strong>。</li>
+    </ul>
+  </div>
 
   <div class="grid-2">
     <div class="panel">
@@ -1756,7 +1892,15 @@ def write_strix_compatible_run(
 - **検証状態**: `{f.verification_status}`（静的パターン一致・要手動確認）
 - **場所**: `{f.file_path}:{f.line_number}`
 
-## 1. 何が起きるか（リスク概要）
+## 💼 0. 経営者・非IT部門向け解説（なぜ経営に関わり、どんな損失につながるか？）
+- **💡 IT専門用語なしで言うと？（たとえ話）**:
+  {f.plain_explanation}
+- **💼 なぜ経営・事業に関わるのか？**:
+  {f.management_impact}
+- **📉 放置した場合に想定される具体的な損失・被害シナリオ**:
+  {f.estimated_loss_scenario}
+
+## 1. 技術的な現象（何が起きるか）
 {f.what_happens}
 
 ## 2. 再現手順（どうやって確かめたか）
@@ -1792,11 +1936,18 @@ def write_strix_compatible_run(
         + "\n".join(domain_table_rows)
     )
 
-    # 弱点一覧テーブル（3軸リスク順）
+    # 弱点一覧テーブル（3軸リスク順）＋非IT向け経営影響リスト
     finding_rows = []
+    exec_finding_blocks = []
     for f in sorted_findings:
         finding_rows.append(
             f"| `{f.id}` | **{f.severity}** | **{f.risk_priority_score}**/125 | {f.title} | `{f.file_path}:{f.line_number}` | `findings/{f.id}.md` |"
+        )
+        exec_finding_blocks.append(
+            f"### 🚨 `[{f.id}]` {f.title} （重要度: `{f.severity}` / 場所: `{f.file_path}:{f.line_number}`）\n"
+            f"- **💡 専門用語なしで言うと？**: {f.plain_explanation}\n"
+            f"- **💼 なぜ経営に関わるか？**: {f.management_impact}\n"
+            f"- **📉 想定される具体的損失**: {f.estimated_loss_scenario}\n"
         )
     findings_table = (
         "| ID | 重要度 | 3軸リスク値 | 弱点の内容 | 場所 | 詳細ファイル |\n"
@@ -1804,6 +1955,11 @@ def write_strix_compatible_run(
         + "\n".join(finding_rows)
         if finding_rows
         else "✅ **今回の検査範囲では、再現確認された弱点は 0 件でした。**（下の「3つの確認視点」を必ずご確認ください）"
+    )
+    exec_findings_md = (
+        "\n".join(exec_finding_blocks)
+        if exec_finding_blocks
+        else "✅ **現在、経営に直結する重大なパターン一致は検出されていません。**（引き続き定期的な点検と未検証領域の確認を推奨します）"
     )
 
     boundaries_md = "\n".join(f"- {b}" for b in topology.trust_boundaries)
@@ -1823,6 +1979,19 @@ def write_strix_compatible_run(
 | **監査カバレッジ率（推定）** | **算出不可（静的パターン検査のため）** （検査モード: `{metadata.mode}` / 検査ファイル数: {metadata.files_scanned} 件 / 誤検知除外: {metadata.false_positives_filtered} 件） |
 | **推奨継続保守プラン** | **{recommended_plan}** （提案書: `{run_dir / 'maintenance_proposal.md'}`） |
 | **ビジュアルHTMLレポート** | `{run_dir / 'report.html'}` |
+
+---
+
+## 💼 1-B. 経営者・非IT部門向けエグゼクティブ解説（なぜ情報漏洩リスクが経営に関わり、どんな損失につながるのか？）
+
+セキュリティの穴（脆弱性）は「IT部門だけの技術的な問題」ではなく、放置すると以下の**3つの経営損失**に直結します（※被害規模は保有データ件数や事業規模により異なります）。
+
+1. **💰 直接的な金銭流出・営業停止損失（キャッシュフローの毀損）**
+   - プログラムに埋め込まれた鍵（APIキー・パスワード）の盗用による**一晩で数百万円規模の海外不正利用課金**、ランサムウェア（身代金ウイルス）感染による全社業務停止、および外部専門機関による原因調査（フォレンジック調査費用：数百万円〜1,000万円超）が発生します。
+2. **⚖️ 法的・行政上の責任（個人情報保護法上の報告・通知義務）**
+   - 顧客データの漏洩が発生した場合、**個人情報保護委員会への法定報告および本人への通知**が義務付けられるケースがあり、お詫び・見舞金対応や、安全管理措置義務違反による行政指導・社名公表のリスクを負います。
+3. **🤝 取引停止・信用の失墜（サプライチェーンからの排除）**
+   - 大手取引先・金融機関・決済代行会社のセキュリティ基準を満たせなくなり、**既存の委託契約解除・新規大口商談の失注・カード決済の停止**につながります。
 
 ---
 
@@ -1853,9 +2022,12 @@ def write_strix_compatible_run(
 
 ---
 
-## 📋 4. 検出されたセキュリティホール一覧（3軸リスク優先度順）
+## 📋 4. 検出されたセキュリティホール一覧と経営への影響（3軸リスク優先度順）
 
 {findings_table}
+
+### 💡 検出された各リスクの「専門用語なし解説」と「想定される経営損失」
+{exec_findings_md}
 
 ---
 

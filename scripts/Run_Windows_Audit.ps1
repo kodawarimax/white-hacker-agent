@@ -190,7 +190,8 @@ function Invoke-NativePowerShellAudit {
         $rowsHtml += "<div style='background:#1e293b;border:1px solid #334155;border-radius:10px;padding:16px;margin-bottom:14px;'>"
         $rowsHtml += "<h3 style='margin:0 0 8px 0;color:#f8fafc;'>[$($item.id)] [$($item.severity)] $($item.title)</h3>"
         $rowsHtml += "<p style='color:#94a3b8;font-size:13px;margin:0 0 8px 0;'>場所: <code>$($item.file_path):$($item.line_number)</code> ｜ 担当: $($item.role)</p>"
-        $rowsHtml += "<p><strong>リスク内容:</strong> $($item.what_happens)</p>"
+        $rowsHtml += "<p><strong>リスク内容（専門用語なし解説）:</strong> $($item.what_happens)</p>"
+        $rowsHtml += "<p style='background:#1e1b4b;border-left:4px solid #818cf8;padding:10px;border-radius:6px;color:#e0e7ff;'><strong>💼 なぜ経営に関わるか・想定される損失:</strong> パスワードやデータの漏洩・ランサムウェア感染により、①外部専門調査（フォレンジック）費用や不正利用課金、②個人情報保護法上の報告・通知対応、③取引先からの契約停止・営業停止損失につながる経営リスクです。</p>"
         $rowsHtml += "<p><strong>是正方法:</strong> $($item.remediation)</p>"
         $rowsHtml += "<pre style='background:#020617;padding:10px;border-radius:6px;color:#38bdf8;'><code>$($item.patch_example)</code></pre></div>"
     }
@@ -212,12 +213,16 @@ function Invoke-NativePowerShellAudit {
       <div style="font-size:18px;font-weight:700;">Grade $grade</div>
     </div>
   </div>
+  <div style="background:#1e1b4b;border:1px solid #818cf8;padding:18px;border-radius:12px;margin-bottom:24px;">
+    <h2 style="margin:0 0 8px 0;font-size:18px;color:#a5b4fc;">💼 経営者・非IT部門向け解説：なぜ情報漏洩リスクが経営に関わり、どんな損失につながるのか？</h2>
+    <p style="margin:0;font-size:14px;color:#e0e7ff;">セキュリティの弱点は放置すると、<strong>①API不正利用課金やランサムウェア感染による営業停止・調査費用（数百万円〜）、②個人情報保護法上の行政報告・顧客通知義務、③取引先からの契約解除・信用失墜</strong>に直結します。</p>
+  </div>
   <h2>📋 検出されたセキュリティホールと是正計画 ($($findings.Count) 件)</h2>
   $rowsHtml
 </div></body></html>
 "@
     Set-Content -Path $htmlPath -Value $htmlContent -Encoding UTF8
-    Set-Content -Path $summaryPath -Value "# 包括セキュリティ監査レポート`n- 総合得点: **$finalScore / 100点 (Grade $grade)**`n- 検出件数: $($findings.Count) 件`n- HTMLレポート: $htmlPath" -Encoding UTF8
+    Set-Content -Path $summaryPath -Value "# 包括セキュリティ監査レポート`n- 総合得点: **$finalScore / 100点 (Grade $grade)**`n- 検出件数: $($findings.Count) 件`n- 経営影響: 情報漏洩やランサムウェア感染による調査費用・法的報告義務・取引停止リスクを防ぐため、早期是正を推奨します。`n- HTMLレポート: $htmlPath" -Encoding UTF8
 
     Write-Host ""
     Write-Host "[OK] Windows監査レポートを生成しました: $htmlPath" -ForegroundColor Green
