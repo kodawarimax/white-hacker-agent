@@ -25,9 +25,11 @@ AI White Hacker Runner — Holistic Organizational Security Audit & 100-Point Sc
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime as dt
 import html
 import json
+import logging
 import os
 import platform
 import re
@@ -40,6 +42,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+logger = logging.getLogger("white_hacker")
+
 
 def _ensure_utf8_stdio() -> None:
     """Windows環境(CP932コンソール等)でも絵文字・日本語で文字化けやエラーが起きないようUTF-8へ再設定"""
@@ -48,8 +52,8 @@ def _ensure_utf8_stdio() -> None:
         if callable(reconf):
             try:
                 reconf(encoding="utf-8", errors="replace")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("UTF-8 stdio reconfigure skipped: %s", exc)
 
 
 def _open_in_browser(html_file: Path) -> None:
@@ -59,8 +63,8 @@ def _open_in_browser(html_file: Path) -> None:
             os.startfile(str(html_file))  # type: ignore[attr-defined]
         else:
             webbrowser.open(html_file.as_uri())
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Browser auto-open skipped: %s", exc)
 
 
 ALLOWED_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
@@ -140,83 +144,106 @@ AUDIT_DOMAINS_SPEC: Dict[str, Dict[str, Any]] = {
 }
 
 
-def _derive_executive_business_impact(
-    category: str, domain_key: str, severity: str, title: str
-) -> Tuple[str, str, str]:
-    """
-    IT専門知識がない経営者・事業責任者・営業担当者にも直感的に伝わるよう、
-    各脆弱性を「①専門用語なしのたとえ話」「②なぜ経営・事業に関わるのか」「③想定される具体的損失シナリオ」へ翻訳する。
-    ※損失規模は保有データ件数や取引条件に依存する業界一般的なリスク試算であり、確定損害額を保証するものではない。
-    """
-    cat_u = (category + " " + title).upper()
-
-    if "IDOR" in cat_u or "BOLA" in cat_u or "BROKEN ACCESS CONTROL" in cat_u:
-        return (
+_EXEC_IMPACT_RULES: Tuple[Tuple[Tuple[str, ...], Tuple[str, str, str]], ...] = (
+    (
+        ("IDOR", "BOLA", "BROKEN ACCESS CONTROL"),
+        (
             "マンションのオートロック（ログイン画面）は通過させておきながら、各部屋のドアに鍵がかかっていない状態です。画面のURLや注文番号を『1001』から『1002』に書き換えるだけで、赤の他人の注文履歴・請求書・個人情報がそのまま見えてしまいます。",
             "特別なハッキングツールを使わなくても、一般的なブラウザ操作だけで他人の顧客データを覗き見できるため、最も発覚・悪用されやすい弱点です。顧客からの指摘やSNSでの拡散により、即日サービス停止と信用失墜に直結します。",
             "①個人情報保護委員会への法定報告および全対象顧客への個別謝罪・通知対応、②原因調査（デジタルフォレンジック）とシステム緊急改修期間中の営業停止損失、③法人取引先からのセキュリティ基準不適合による契約解除・取引停止。",
-        )
-    if "FUNCTION LEVEL" in cat_u or "管理者エンドポイント" in title:
-        return (
+        ),
+    ),
+    (
+        ("FUNCTION LEVEL", "管理者エンドポイント"),
+        (
             "社員証の確認をせずに『関係者以外立入禁止』の社長室や金庫室のドアが開いてしまう状態です。一般のお客様でも、管理画面のアドレス（URL）さえ推測できれば、社員・管理者専用の操作（全顧客データの閲覧や削除など）を実行できてしまいます。",
             "一般利用者アカウントからシステム全体の管理権限を奪われるため、顧客名簿の丸ごと持ち出しや不正返金・設定破壊など、事業の継続そのものを脅かす重大インシデントに直結します。",
             "①管理機能悪用による全顧客データの漏洩・改ざん被害、②不正操作の範囲特定とシステム復旧に伴う長期サービス停止、③安全管理措置義務違反による行政指導および主要取引先からの契約打ち切り。",
-        )
-    if "JWT" in cat_u or "IDENTIFICATION AND AUTHENTICATION" in cat_u:
-        return (
+        ),
+    ),
+    (
+        ("JWT", "IDENTIFICATION AND AUTHENTICATION"),
+        (
             "入館証の『偽造防止スタンプ（署名）』を警備員が確認していない状態です。来訪者が自分で紙に『社長』『A様』と書き換えた偽の入館証を見せるだけで、パスワードを知らなくても本人確認を素通りしてしまいます。",
             "パスワードを盗まなくても、あらゆる顧客やシステム管理者へ100%なりすましが可能になります。決済・契約・機密データを扱うサービスでは、全アカウント乗っ取りに等しい致命的な経営リスクです。",
             "①全顧客・管理者アカウントの不正乗っ取りリスクによるサービス全面停止、②全ユーザーへの認証強制リセットと公表・謝罪対応、③不正ログインを通じた不正決済・ポイントや資産の不正引き出しによる直接的な金銭被害。",
-        )
-    if "COOKIE" in cat_u or "HTTPONLY" in cat_u:
-        return (
+        ),
+    ),
+    (
+        ("COOKIE", "HTTPONLY"),
+        (
             "ログイン中の『通行証（Cookie）』を、画面上のプログラムから誰でも覗き見できるポケットに入れている状態です。もし画面に悪質なスクリプトが紛れ込むと、通行証をそのまま抜き取られてしまいます。",
             "画面側の小さな不具合と組み合わさった瞬間に、利用中の顧客アカウントが乗っ取られる踏み台になります。金融・EC・B2B SaaSのセキュリティ審査で必ず指摘される項目です。",
             "①顧客アカウントの乗っ取り被害およびカスタマーサポート・補償対応コストの発生、②大手取引先のセキュリティチェックシート（委託先審査）での不合格による商談失注。",
-        )
-    if "SQL" in cat_u:
-        return (
+        ),
+    ),
+    (
+        ("SQL",),
+        (
             "倉庫の係員への注文書に『商品Aを1つください。あと倉庫にある全顧客の名簿も全部箱に入れて出してください』と書き足すと、係員が疑問を持たずに全顧客データを差し出してしまう状態です。",
             "たった1つの検索窓や入力欄の弱点から、データベース内の全顧客情報・取引履歴・認証情報が丸ごと抜き取られる、あるいは全データが消去される『一発廃業級』の最大級リスクです。",
             "①全件規模の個人情報漏洩による記者会見・個人情報保護委員会への報告・本人通知費用、②外部専門機関によるフォレンジック調査費用（数百万円〜数千万円規模）と数週間のサービス停止損失、③カード情報等が含まれる場合の決済加盟店契約の停止・損害賠償負担。",
-        )
-    if "COMMAND INJECTION" in cat_u or "OSコマンド" in title:
-        return (
+        ),
+    ),
+    (
+        ("COMMAND INJECTION", "OSコマンド"),
+        (
             "Webサイトの入力欄から、裏側で動いているサーバー本体（会社のコンピュータそのもの）に『このファイルを消せ』『外部へ全データを送信しろ』という直接命令を送り込めてしまう状態です。",
             "Webアプリだけでなくサーバー自体を完全に支配（乗っ取り）されるため、社内ネットワークへの侵入拡大、ランサムウェア感染、さらには自社サーバーが他社へのサイバー攻撃の踏み台（加害者）にされる重大な経営リスクです。",
             "①サーバー完全乗っ取り・ランサムウェア感染による長期の事業停止、②自社サーバーが他社攻撃の踏み台に悪用されたことによる対外的な損害賠償・信用失墜、③インフラ全面再構築と専門調査にかかる高額費用。",
-        )
-    if "XSS" in cat_u or "CROSS-SITE SCRIPTING" in cat_u:
-        return (
+        ),
+    ),
+    (
+        ("XSS", "CROSS-SITE SCRIPTING"),
+        (
             "自社のWeb画面に『そのページを開いた人のブラウザ上で勝手に不正操作を行う透明な罠』を仕掛けられる状態です。ページを開いた他のお客様や社内スタッフの画面上で、勝手に情報送信や操作が行われます。",
             "自社の正規サイトが『訪れた顧客に被害を与える媒介サイト』になってしまうため、顧客からの信頼喪失やブランド毀損、管理画面で発火した場合の社内管理者権限の乗っ取りに直結します。",
             "①利用顧客のセッション乗っ取りや偽決済画面への誘導による被害補償、②『危ないサイト』としての悪評拡散・ブラウザ警告表示による売上・CVRの急落。",
-        )
-    if "SSRF" in cat_u:
-        return (
+        ),
+    ),
+    (
+        ("SSRF",),
+        (
             "外部の人が入れないはずの『社内専用エリア』に、社内の受付ロボットを使って代わりに機密書類の写真を撮ってこさせるような手口です。サーバー自身に社内ネットワークやクラウドの裏口へアクセスさせて秘密情報を盗み出します。",
             "外からは見えないはずの社内管理システムや、クラウド（AWS/GCP等）の最高権限キーが抜き取られ、クラウド環境全体が乗っ取られる危険があります。",
             "①クラウド管理権限の奪取による全システム・全データベースの流出、②社内専用ネットワークへの不正侵入による機密情報の漏洩と全面的なインフラ再構築コスト。",
-        )
-    if any(k in cat_u for k in ("SECRET", "PASSWORD", "CREDENTIAL", "GITLEAKS", "秘密鍵", "パスワード")):
-        return (
+        ),
+    ),
+    (
+        ("SECRET", "PASSWORD", "CREDENTIAL", "GITLEAKS", "秘密鍵", "パスワード"),
+        (
             "会社の金庫の暗証番号や法人クレジットカード番号を、社外の人も見られるパンフレットやプログラムの余白にマジックで直接書き込んでいる状態です。",
             "業務委託先、退職者、あるいはWebブラウザの『ソース表示』を開いた一般利用者から、データベースの鍵やAI/クラウドのAPIキーをそのまま抜き取られます。漏洩から数分以内に世界中の自動ボットに悪用される即効性の高い経営リスクです。",
             "①AI・クラウドAPIキーの不正利用による一晩で数百万円規模の海外不正課金（高額請求被害）、②DBパスワード流出による全顧客データの無断持ち出し、③全システムの鍵の緊急総入れ替えに伴うシステム停止。",
-        )
-    if any(k in cat_u for k in ("FIREWALL", "EXPOSED", "PORT", "ファイアウォール", "危険ポート")):
-        return (
+        ),
+    ),
+    (
+        ("FIREWALL", "EXPOSED", "PORT", "ファイアウォール", "危険ポート"),
+        (
             "オフィスの正面玄関や裏口の鍵を開けっ放しにし、泥棒が24時間いつでも外からドアノブをガチャガチャ試せる（パスワード総当たり攻撃やウイルス侵入ができる）状態です。",
             "Windows端末やサーバーがランサムウェア（身代金要求ウイルス）に感染する最大の原因です。1台のPCやサーバーの感染から社内LAN全体のファイルが暗号化され、全社の業務・出荷・請求がストップする経営危機に直結します。",
             "①ランサムウェア感染による全社業務・工場・店舗の停止（数日〜数ヶ月の売上喪失）、②暗号化された業務データの復旧・フォレンジック調査対応費用（数百万円〜数千万円）、③取引先への納期遅延・サプライチェーンへの感染拡大による巨額の信用失墜。",
-        )
-    if "ARBITRARY CODE EXECUTION" in cat_u or "EVAL" in cat_u:
-        return (
+        ),
+    ),
+    (
+        ("ARBITRARY CODE EXECUTION", "EVAL"),
+        (
             "外部の入力やAIが生成した文章を、安全確認せずにそのまま『会社のサーバーへの直接プログラム命令』として実行してしまう状態です。",
             "悪意ある入力1つでサーバー全体が乗っ取られ、全データの流出やシステム破壊が可能になるため、そのまま本番稼働させてはならない致命的リスクです。",
             "①サーバー完全乗っ取りによる情報漏洩とサービス全面停止、②AI機能の悪用（プロンプトインジェクション経由のシステム侵害）による事業継続不能とサービス閉鎖。",
-        )
+        ),
+    ),
+)
 
+
+def _derive_executive_business_impact(
+    category: str, domain_key: str, severity: str, title: str
+) -> Tuple[str, str, str]:
+    """各脆弱性を「①専門用語なしのたとえ話」「②なぜ経営・事業に関わるのか」「③想定される具体的損失シナリオ」へ翻訳する。"""
+    cat_u = (category + " " + title).upper()
+    for keywords, impact_tuple in _EXEC_IMPACT_RULES:
+        if any(k in cat_u for k in keywords):
+            return impact_tuple
     return (
         "建物の設計図や防犯カメラの死角リストを壁に貼り出していたり（デバッグ情報の露出）、警報ベルの電源を切っている（エラーの握り潰し・過剰な通信許可）状態です。",
         "単独ですぐに情報漏洩が起きなくても、攻撃者にシステム内部の弱点（ヒント）を教えたり、不正アクセスを受けていることに何ヶ月も気づけなくなる（被害を何倍にも拡大させる）組織管理上の弱点です。",
@@ -250,6 +277,9 @@ class VulnerabilityFinding:
     estimated_loss_scenario: str = ""
 
     def __post_init__(self) -> None:
+        # Source lines can contain secrets unrelated to the matched rule. Never
+        # copy source into shareable reports, including external-tool snippets.
+        self.code_snippet = "[SOURCE REDACTED: inspect the indicated file locally]"
         if not (self.plain_explanation and self.management_impact and self.estimated_loss_scenario):
             plain, mgmt, loss = _derive_executive_business_impact(
                 self.category, self.domain_key, self.severity, self.title
@@ -291,14 +321,14 @@ class OrganizationTopology:
 
 @dataclass
 class AuditScorecard:
-    raw_score: int  # 0-100 (単純減点後の合計)
-    final_score: int  # 0-100 (致命的欠陥キャップ適用後の最終得点)
+    raw_score: Optional[int]  # None when the requested inspection is incomplete
+    final_score: Optional[int]
     max_score: int  # 100
     grade: str  # S, A, B, C, D, F
     verdict: str  # NO_MATCH_IN_STATIC_SCOPE / CONDITIONAL_FIX_REQUIRED / BLOCK_CRITICAL_RISK
     cap_applied: bool
     cap_reason: str
-    audit_coverage_percent: int
+    audit_coverage_percent: Optional[int]
     domain_scores: List[DomainScoreDetail]
     executive_summary: str
 
@@ -306,7 +336,7 @@ class AuditScorecard:
 @dataclass
 class RunMetadata:
     run_id: str
-    status: str  # completed | stopped
+    status: str  # completed (local static scope only) | partial | unsupported
     target: str
     target_type: str  # local_folder | git_repo | api_spec | staging_url
     mode: str  # quick | standard | deep
@@ -319,11 +349,93 @@ class RunMetadata:
     candidates_inspected: int
     false_positives_filtered: int
     pattern_match_count: int
-    overall_score: int = 100
-    overall_grade: str = "S"
-    overall_verdict: str = "NO_MATCH_IN_STATIC_SCOPE"
+    overall_score: Optional[int] = None
+    overall_grade: str = "N/A"
+    overall_verdict: str = "NOT_EVALUATED"
     coverage: Dict[str, str] = field(default_factory=dict)
     three_point_zero_check: Dict[str, str] = field(default_factory=dict)
+    scan_scope: Dict[str, Any] = field(default_factory=dict)
+    external_tools: Dict[str, Any] = field(default_factory=dict)
+    host_audit: Dict[str, Any] = field(default_factory=dict)
+    schema_version: int = 2
+
+
+@dataclass
+class ScanScope:
+    candidate_files: int = 0
+    selected_files: int = 0
+    scanned_files: int = 0
+    unsupported_files: int = 0
+    policy_excluded_files: int = 0
+    policy_excluded_directories: int = 0
+    symlink_files: int = 0
+    symlink_directories: int = 0
+    oversize_files: int = 0
+    read_errors: int = 0
+    enumeration_errors: int = 0
+    file_limit_reached: bool = False
+
+    @property
+    def incomplete(self) -> bool:
+        return bool(self.file_limit_reached or self.symlink_files or
+                    self.symlink_directories or self.oversize_files or
+                    self.read_errors or self.enumeration_errors)
+
+
+def _score_text(scorecard: AuditScorecard) -> str:
+    return (f"{scorecard.final_score} / 100 点" if scorecard.final_score is not None
+            else "算出不可（未検査・不完全）")
+
+
+def _scoped_file(path: Path, root: Path) -> bool:
+    """Refuse links, including links in parent components, before every read."""
+    base = root.parent if root.is_file() else root
+    try:
+        relative = path.relative_to(base)
+        current = base
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                return False
+        path.resolve(strict=True).relative_to(base.resolve(strict=True))
+        return path.is_file()
+    except (ValueError, OSError, RuntimeError):
+        return False
+
+
+def _python_sql_variable_lines(content: str) -> set:
+    """Small local AST check; this deliberately does not claim taint analysis."""
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return set()
+    hits = set()
+
+    def statements(body: List[Any]) -> None:
+        dynamic = set()
+        for stmt in body:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                statements(stmt.body)
+                continue
+            if isinstance(stmt, ast.Assign):
+                text = ast.get_source_segment(content, stmt.value) or ""
+                risky = bool(re.search(r"\b(SELECT|INSERT|UPDATE|DELETE)\b", text, re.I)) and any(
+                    isinstance(n, ast.JoinedStr) or
+                    (isinstance(n, ast.BinOp) and isinstance(n.op, (ast.Add, ast.Mod))) or
+                    (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == 'format')
+                    for n in ast.walk(stmt.value))
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name):
+                        dynamic.discard(target.id)
+                        if risky:
+                            dynamic.add(target.id)
+            for call in ast.walk(stmt):
+                if (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                    and call.func.attr in ('execute', 'executemany', 'query', 'raw', 'exec_driver_sql')
+                    and call.args and isinstance(call.args[0], ast.Name) and call.args[0].id in dynamic):
+                    hits.add(call.lineno)
+    statements(tree.body)
+    return hits
 
 
 def validate_target_scope(
@@ -339,6 +451,8 @@ def validate_target_scope(
         for h in allow_staging_hosts:
             allow_hosts.add(h.strip().lower())
 
+    if target.startswith(('\\\\', '//')):
+        return False, 'network_path', '[SECURITY GATE BLOCKED] ネットワーク共有パスは検査対象外です。'
     parsed = urllib.parse.urlparse(target)
     if parsed.scheme in ("http", "https"):
         host = (parsed.hostname or "").lower()
@@ -373,7 +487,56 @@ def validate_target_scope(
 class OrganizationTopologyAnalyzer:
     """組織・プロジェクトの全体構造（6大レイヤー・サブプロジェクト・技術スタック・信頼境界）を自動解析"""
 
-    def analyze(self, root_path: Path, scanned_files: List[Path]) -> OrganizationTopology:
+    @staticmethod
+    def _classify_file_into_topology(
+        fpath: Path,
+        route_re: re.Pattern[str],
+        layer_counts: Dict[str, int],
+        tech_stack: Any,
+        content: str = "",
+    ) -> int:
+        name_lower = fpath.name.lower()
+        rel_parts = [p.lower() for p in fpath.parts]
+        suffix = fpath.suffix.lower()
+
+        if suffix in (".tsx", ".jsx") or any(k in rel_parts for k in ("components", "pages", "views", "ui")):
+            layer_counts["frontend_ui"] += 1
+            tech_stack.add("Frontend UI (React/Next.js/Web)")
+        elif suffix == ".sql" or any(k in name_lower for k in ("schema", "migration", "prisma", "models")):
+            layer_counts["data_db"] += 1
+            tech_stack.add("Database / Schema Layer")
+        elif any(k in rel_parts for k in (".github", "docker", "infra", "deploy")) or name_lower in (
+            "dockerfile",
+            "docker-compose.yml",
+            "package.json",
+            "requirements.txt",
+            "pyproject.toml",
+        ):
+            layer_counts["infra_ci_config"] += 1
+        elif any(k in rel_parts for k in ("agents", ".agents", ".claude", "skills", "prompts")):
+            layer_counts["ai_agents_governance"] += 1
+            tech_stack.add("AI Agent / Skill Governance")
+        else:
+            layer_counts["backend_api"] += 1
+
+        if suffix == ".py":
+            tech_stack.add("Python")
+        elif suffix in (".ts", ".tsx", ".js", ".jsx"):
+            tech_stack.add("TypeScript/JavaScript")
+
+        try:
+            txt = content
+            low = txt.lower()
+            for fw_key, fw_label in (("fastapi", "FastAPI"), ("express", "Express"), ("supabase", "Supabase")):
+                if fw_key in low:
+                    tech_stack.add(fw_label)
+            return len(route_re.findall(txt))
+        except OSError as exc:
+            logger.debug("Topology file read skipped for %s: %s", fpath, exc)
+            return 0
+
+    def analyze(self, root_path: Path, scanned_files: List[Path],
+                file_contents: Optional[Dict[Path, str]] = None) -> OrganizationTopology:
         base_dir = root_path.parent if root_path.is_file() else root_path
         subprojects: List[str] = []
         tech_stack = set()
@@ -387,14 +550,17 @@ class OrganizationTopologyAnalyzer:
         api_routes_count = 0
         has_tests = False
 
-        # サブプロジェクト・テスト有無の確認
         if base_dir.is_dir():
-            for child in sorted(base_dir.iterdir()):
+            markers = ("package.json", "pyproject.toml", "requirements.txt", "Cargo.toml", "go.mod", "README.md")
+            try:
+                children = sorted(base_dir.iterdir())
+            except OSError:
+                children = []
+            for child in children:
+                if child.is_symlink():
+                    continue
                 if child.is_dir() and child.name not in SKIP_DIRS and not child.name.startswith("."):
-                    if any(
-                        (child / marker).exists()
-                        for marker in ("package.json", "pyproject.toml", "requirements.txt", "Cargo.toml", "go.mod", "README.md")
-                    ):
+                    if any((child / m).exists() for m in markers):
                         subprojects.append(child.name)
                 if child.is_dir() and child.name in ("tests", "test", "__tests__", "e2e"):
                     has_tests = True
@@ -407,57 +573,23 @@ class OrganizationTopologyAnalyzer:
         )
 
         for fpath in scanned_files:
-            name_lower = fpath.name.lower()
-            rel_parts = [p.lower() for p in fpath.parts]
-            suffix = fpath.suffix.lower()
+            api_routes_count += self._classify_file_into_topology(fpath, route_re, layer_counts, tech_stack, (file_contents or {}).get(fpath, ""))
 
-            if suffix in (".tsx", ".jsx") or any(k in rel_parts for k in ("components", "pages", "views", "ui")):
-                layer_counts["frontend_ui"] += 1
-                tech_stack.add("Frontend UI (React/Next.js/Web)")
-            elif suffix in (".sql",) or any(k in name_lower for k in ("schema", "migration", "prisma", "models")):
-                layer_counts["data_db"] += 1
-                tech_stack.add("Database / Schema Layer")
-            elif any(k in rel_parts for k in (".github", "docker", "infra", "deploy")) or name_lower in (
-                "dockerfile",
-                "docker-compose.yml",
-                "package.json",
-                "requirements.txt",
-                "pyproject.toml",
-            ):
-                layer_counts["infra_ci_config"] += 1
-            elif any(k in rel_parts for k in ("agents", ".agents", ".claude", "skills", "prompts")):
-                layer_counts["ai_agents_governance"] += 1
-                tech_stack.add("AI Agent / Skill Governance")
-            else:
-                layer_counts["backend_api"] += 1
-
-            if suffix == ".py":
-                tech_stack.add("Python")
-            elif suffix in (".ts", ".tsx", ".js", ".jsx"):
-                tech_stack.add("TypeScript/JavaScript")
-
-            try:
-                txt = fpath.read_text(encoding="utf-8", errors="ignore")
-                api_routes_count += len(route_re.findall(txt))
-                if "fastapi" in txt.lower():
-                    tech_stack.add("FastAPI")
-                if "express" in txt.lower():
-                    tech_stack.add("Express")
-                if "supabase" in txt.lower():
-                    tech_stack.add("Supabase")
-            except OSError:
-                pass
-
-        # .gitignore による .env 保護確認
         gitignore_path = base_dir / ".gitignore"
         has_gitignore_env = True
         if gitignore_path.exists():
-            gi_text = gitignore_path.read_text(encoding="utf-8", errors="ignore")
-            has_gitignore_env = ".env" in gi_text
+            try:
+                gi_text = (gitignore_path.read_text(encoding="utf-8", errors="ignore")
+                           if _scoped_file(gitignore_path, base_dir) else "")
+            except OSError:
+                gi_text = ""
+            # A substring can be a comment or a negated ignore rule; do not
+            # claim actual Git tracking protection from this heuristic.
+            rules = [line.strip() for line in gi_text.splitlines()]
+            has_gitignore_env = ".env" in rules and "!.env" not in rules
         elif (base_dir / ".env").exists():
             has_gitignore_env = False
 
-        # ロックファイルの存在確認
         has_lockfile = any(
             (base_dir / lf).exists()
             for lf in ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "poetry.lock", "uv.lock", "Pipfile.lock", "requirements.txt")
@@ -513,12 +645,24 @@ def _looks_like_placeholder(token: str) -> bool:
     return bool(_PLACEHOLDER_RE.search(token)) or _shannon_entropy(token) < 2.8
 
 
+def _consume_quoted_span(text: str, start: int, quote_ch: str) -> int:
+    n = len(text)
+    j = start + 1
+    while j < n:
+        if text[j] == "\\":
+            j += 2
+            continue
+        if text[j] == quote_ch or (text[j] == "\n" and quote_ch != "`"):
+            break
+        j += 1
+    return min(j + 1, n)
+
+
 def build_code_mask(text: str, suffix: str) -> Optional[List[str]]:
     """
     各文字を 'c'(コード) / 's'(文字列リテラル内) / 'm'(コメント内) に分類する簡易レキサ。
     コメントや文字列に書かれたパターンを「危険なコード」と誤認しないために使う。
     対応: .py (# と三重引用符) / .js .ts .jsx .tsx .cs .php .java .go (// /* */ とテンプレートリテラル)。
-    それ以外の拡張子は None（マスクなし）。既知の限界: JS の正規表現リテラル内の引用符は誤解釈しうる。
     """
     py = suffix == ".py"
     slash = suffix in (".js", ".jsx", ".ts", ".tsx", ".cs", ".php", ".java", ".go")
@@ -534,47 +678,28 @@ def build_code_mask(text: str, suffix: str) -> Optional[List[str]]:
     i = 0
     while i < n:
         ch = text[i]
-        if py and ch == "#":
+        if (py and ch == "#") or (slash and text.startswith("//", i)):
             j = text.find("\n", i)
-            j = n if j < 0 else j
-            mark(i, j, "m")
-            i = j
-            continue
-        if slash and text.startswith("//", i):
-            j = text.find("\n", i)
-            j = n if j < 0 else j
-            mark(i, j, "m")
-            i = j
-            continue
-        if slash and text.startswith("/*", i):
+            end = n if j < 0 else j
+            mark(i, end, "m")
+            i = end
+        elif slash and text.startswith("/*", i):
             j = text.find("*/", i + 2)
-            j = n if j < 0 else j + 2
-            mark(i, j, "m")
-            i = j
-            continue
-        if py and (text.startswith('"""', i) or text.startswith("'''", i)):
+            end = n if j < 0 else j + 2
+            mark(i, end, "m")
+            i = end
+        elif py and (text.startswith('"""', i) or text.startswith("'''", i)):
             q = text[i : i + 3]
             j = text.find(q, i + 3)
-            j = n if j < 0 else j + 3
-            mark(i, j, "s")
-            i = j
-            continue
-        if ch in "\"'" or (slash and ch == "`"):
-            j = i + 1
-            while j < n:
-                if text[j] == "\\":
-                    j += 2
-                    continue
-                if text[j] == ch:
-                    break
-                if text[j] == "\n" and ch != "`":
-                    break
-                j += 1
-            end = min(j + 1, n)
+            end = n if j < 0 else j + 3
             mark(i, end, "s")
             i = end
-            continue
-        i += 1
+        elif ch in "\"'" or (slash and ch == "`"):
+            end = _consume_quoted_span(text, i, ch)
+            mark(i, end, "s")
+            i = end
+        else:
+            i += 1
     return mask
 
 
@@ -590,10 +715,13 @@ class WhiteHackerScanner:
         self._offsets: List[int] = []
         self._nc: Optional[List[str]] = None
         self._full: str = ""
+        self.scope = ScanScope()
+        self._sql_variable_lines: set = set()
 
     def _prepare(self, content: str, suffix: str, lines: List[str]) -> None:
         """ファイル単位のコード/コメント/文字列マスクと、コメント除去済み行を準備する"""
         self._full = content
+        self._sql_variable_lines = _python_sql_variable_lines(content) if suffix == '.py' else set()
         self._offsets = []
         pos = 0
         for ln in lines:
@@ -617,45 +745,82 @@ class WhiteHackerScanner:
         return None
 
     def _collect_files(self, root_path: Path) -> List[Path]:
+        if root_path.is_symlink():
+            self.scope.symlink_files += 1
+            return []
         if root_path.is_file():
+            if root_path.suffix.lower() not in SCAN_EXTENSIONS and root_path.name.lower() != "dockerfile":
+                self.scope.unsupported_files += 1
+                return []
+            self.scope.candidate_files = self.scope.selected_files = 1
             return [root_path]
         collected: List[Path] = []
         max_files = 80 if self.mode == "quick" else (400 if self.mode == "standard" else 2500)
-        for dirpath, dirnames, filenames in os.walk(root_path):
-            dirnames[:] = [
-                d for d in dirnames if d not in SKIP_DIRS and not d.startswith("test") and d != "tests"
-            ]
+        def walk_error(error: OSError) -> None:
+            self.scope.enumeration_errors += 1
+        for dirpath, dirnames, filenames in os.walk(root_path, onerror=walk_error):
+            keep = []
+            for dirname in sorted(dirnames):
+                if (Path(dirpath) / dirname).is_symlink():
+                    self.scope.symlink_directories += 1
+                elif dirname in SKIP_DIRS or dirname.startswith("test"):
+                    self.scope.policy_excluded_directories += 1
+                else:
+                    keep.append(dirname)
+            dirnames[:] = keep
             for fname in sorted(filenames):
+                fpath = Path(dirpath) / fname
+                if fpath.is_symlink():
+                    self.scope.symlink_files += 1
+                    continue
                 if (
                     fname.startswith("test_")
                     or fname.endswith(".test.ts")
                     or fname.endswith(".spec.ts")
                     or fname == "white_hacker_runner.py"
                 ):
+                    self.scope.policy_excluded_files += 1
                     continue
-                fpath = Path(dirpath) / fname
                 if fpath.suffix.lower() in SCAN_EXTENSIONS or fname.lower() == "dockerfile":
-                    collected.append(fpath)
-                    if len(collected) >= max_files:
-                        return collected
+                    self.scope.candidate_files += 1
+                    if len(collected) < max_files:
+                        collected.append(fpath)
+                    else:
+                        self.scope.file_limit_reached = True
+                else:
+                    self.scope.unsupported_files += 1
+        self.scope.selected_files = len(collected)
         return collected
 
     def scan_target(
         self, resolved_path: str
     ) -> Tuple[List[VulnerabilityFinding], int, OrganizationTopology]:
         root = Path(resolved_path)
+        self.scope = ScanScope()
+        self.candidates_inspected = self.false_positives_filtered = 0
         files = self._collect_files(root)
-        topology = OrganizationTopologyAnalyzer().analyze(root, files)
+        read_contents: Dict[Path, str] = {}
         findings: List[VulnerabilityFinding] = []
         vuln_seq = 1
 
         for fpath in files:
             try:
-                if fpath.stat().st_size > 2_000_000:
+                if not _scoped_file(fpath, root):
+                    self.scope.read_errors += 1
                     continue
-                content = fpath.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
+                if fpath.stat().st_size > 2_000_000:
+                    self.scope.oversize_files += 1
+                    continue
+                content = fpath.read_text(encoding="utf-8")
+                if not _scoped_file(fpath, root):
+                    self.scope.read_errors += 1
+                    continue
+            except (OSError, UnicodeError):
+                self.scope.read_errors += 1
                 continue
+
+            read_contents[fpath] = content
+            self.scope.scanned_files += 1
 
             rel_path = str(fpath.relative_to(root.parent if root.is_file() else root)).replace("\\", "/")
             content = content.replace("\r\n", "\n")
@@ -692,13 +857,62 @@ class WhiteHackerScanner:
                 findings.append(f)
                 vuln_seq += 1
 
-        return findings, len(files), topology
+        topology = OrganizationTopologyAnalyzer().analyze(root, list(read_contents), read_contents)
+        return findings, self.scope.scanned_files, topology
 
     def _window(self, lines: List[str], idx: int, before: int = 8, after: int = 18) -> str:
         src = self._nc if self._nc is not None and len(self._nc) == len(lines) else lines
         start = max(0, idx - before)
         end = min(len(src), idx + after)
         return "\n".join(src[start:end])
+
+    def _route_scope(self, lines: List[str], idx: int) -> str:
+        """Bound heuristics to one handler; never borrow a neighbor's guard."""
+        src = self._nc if self._nc is not None else lines
+        end = len(src)
+        next_route = re.compile(r"^\s*(@\w+\.|(?:app|router)\.(?:get|post|put|delete|patch)\(|export\s+)")
+        for j in range(idx + 1, len(src)):
+            if next_route.search(src[j]):
+                end = j
+                break
+        return "\n".join(src[idx:end])
+
+    def _has_owner_rejection(self, lines: List[str], idx: int) -> bool:
+        if self._mask is None:
+            return False
+        try:
+            module = ast.parse(self._full)
+        except SyntaxError:
+            # Narrow fallback for JS query predicates; literals/comments cannot
+            # constitute ownership enforcement on their own.
+            scope = self._route_scope(lines, idx)
+            return bool(re.search(r"find\w*\(\s*\{[^}]*\bowner\s*:\s*req\.user\.id\b", scope))
+        for node in ast.walk(module):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not any(d.lineno == idx + 1 for d in node.decorator_list):
+                continue
+            # Only straight-line guards before return qualify. A log, string,
+            # nested helper or dead branch is not proof of authorization.
+            lookups = set()
+            for stmt in node.body:
+                if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call):
+                    lookups.update(t.id for t in stmt.targets if isinstance(t, ast.Name))
+                if isinstance(stmt, ast.Return):
+                    break
+                if not isinstance(stmt, ast.If) or not stmt.body or not isinstance(stmt.body[0], ast.Raise):
+                    continue
+                test = stmt.test
+                if not isinstance(test, ast.Compare) or len(test.ops) != 1 or not isinstance(test.ops[0], ast.NotEq):
+                    continue
+                a, b = test.left, test.comparators[0]
+                for owner, user in ((a, b), (b, a)):
+                    if (isinstance(owner, ast.Attribute) and owner.attr in ('user_id', 'owner_id', 'owner')
+                        and isinstance(owner.value, ast.Name) and owner.value.id in lookups
+                        and isinstance(user, ast.Attribute) and user.attr == 'id'
+                        and isinstance(user.value, ast.Name) and user.value.id == 'current_user'):
+                        return True
+        return False
 
     def _make_finding(
         self,
@@ -751,10 +965,6 @@ class WhiteHackerScanner:
         route_id_re = re.compile(
             r"""(@(app|router|bp|api)\.(get|post|put|delete|patch|route)\(\s*['"][^'"]*(\{\w*[iI]d\}|<(\w+:)?\w*[iI]d>|:\w*[iI]d\b)|export\s+async\s+function\s+(GET|POST|PUT|DELETE|PATCH)\s*\(|(app|router)\.(get|post|put|delete|patch)\(\s*['"][^'"]*:\w*[iI]d\b)"""
         )
-        ownership_guard_re = re.compile(
-            r"(user_id\s*[!=]=|owner_id\s*[!=]=|\.owner\s*[!=]=|current_user\.\w+|session\.user\.\w+|req\.user\.\w+|request\.user\b|check_ownership|authorize_\w+|authorize\(|permission|can_access|where:.*userId|owner\s*:)",
-            re.IGNORECASE,
-        )
         direct_lookup_re = re.compile(
             r"(\.get\(\s*\w*[iI]d\b|find(Unique|One|ById|ByPk)?\(\s*(\{[^)]*)?(req|request)\.(params|query|body)|findUnique\(\s*\{\s*where:\s*\{\s*\w*[iI]d\b|findById\(|\.objects\.get\(\s*(pk|id)\s*=|SELECT\s+.*FROM\s+\w+\s+WHERE\s+\w*id\s*=|ORDERS\[\s*\w*[iI]d\s*\])",
             re.IGNORECASE,
@@ -772,9 +982,9 @@ class WhiteHackerScanner:
         for i, line in enumerate(lines):
             if self._cm(route_id_re, line, i):
                 self.candidates_inspected += 1
-                scope_text = self._window(lines, i, before=2, after=22)
+                scope_text = self._route_scope(lines, i)
                 if direct_lookup_re.search(scope_text):
-                    if ownership_guard_re.search(scope_text):
+                    if self._has_owner_rejection(lines, i):
                         self.false_positives_filtered += 1
                     else:
                         results.append(
@@ -819,7 +1029,7 @@ class WhiteHackerScanner:
 
             elif "/admin/" in line and self._cm(admin_route_re, line, i):
                 self.candidates_inspected += 1
-                scope_text = self._window(lines, i, before=2, after=18)
+                scope_text = self._route_scope(lines, i)
                 if admin_guard_re.search(scope_text):
                     self.false_positives_filtered += 1
                 else:
@@ -952,7 +1162,7 @@ class WhiteHackerScanner:
         )
 
         for i, line in enumerate(lines):
-            if self._cm(sqli_re, line, i):
+            if self._cm(sqli_re, line, i) or i + 1 in self._sql_variable_lines:
                 self.candidates_inspected += 1
                 results.append(
                     self._make_finding(
@@ -1106,7 +1316,7 @@ class WhiteHackerScanner:
                 m = None
             if m:
                 self.candidates_inspected += 1
-                token_preview = m.group(1)[:8] + "...[REDACTED]"
+                token_preview = "[REDACTED]"
                 results.append(
                     self._make_finding(
                         seq=seq,
@@ -1373,6 +1583,14 @@ class ComprehensiveAuditScorer:
     100点満点標準採点エンジン（6大領域別スコア ＋ 致命的欠陥ハードキャップ制 ＋ 監査カバレッジ算出）
     """
 
+    @staticmethod
+    def _resolve_grade_and_verdict(final_score: int) -> Tuple[str, str]:
+        verdict = "STATIC_PATTERN_REFERENCE (候補は要手動確認・安全保証ではない・公開可否は判定しません)"
+        for min_s, grade in ((95, 'S'), (85, 'A'), (70, 'B'), (50, 'C'), (30, 'D')):
+            if final_score >= min_s:
+                return grade, verdict
+        return 'F', verdict
+
     def evaluate(
         self,
         findings: List[VulnerabilityFinding],
@@ -1381,6 +1599,14 @@ class ComprehensiveAuditScorer:
         status: str,
         budget_limit_reached: bool,
     ) -> AuditScorecard:
+        if status != "completed" or budget_limit_reached or topology.total_files_scanned == 0:
+            return AuditScorecard(
+                raw_score=None, final_score=None, max_score=100, grade="N/A",
+                verdict=f"NOT_EVALUATED ({status}: 未検査・不完全。安全性・公開可否は判定しません)",
+                cap_applied=False, cap_reason="未検査・不完全のため採点しません",
+                audit_coverage_percent=None, domain_scores=[],
+                executive_summary=f"状態: {status}。点数は算出不可。候補は手動確認が必要です。",
+            )
         domain_details: List[DomainScoreDetail] = []
         raw_total = 0
 
@@ -1399,7 +1625,6 @@ class ComprehensiveAuditScorer:
                 counts[df.severity] = counts.get(df.severity, 0) + 1
                 deducted += int(penalties.get(df.severity, 1))
 
-            # 環境保護欠如（.gitignore に .env がない等）の構造減点
             if dkey == "secrets_data" and not topology.has_gitignore_env_protection:
                 deducted += 3
 
@@ -1407,13 +1632,7 @@ class ComprehensiveAuditScorer:
             earned = max_pts - deducted
             raw_total += earned
             pct = round((earned / max_pts) * 100.0, 1) if max_pts > 0 else 100.0
-
-            if counts["CRITICAL"] > 0 or counts["HIGH"] > 0:
-                status_label = "CRITICAL_DEFECT"
-            elif deducted > 0:
-                status_label = "WARNING"
-            else:
-                status_label = "PASS"
+            status_label = "CRITICAL_DEFECT" if (counts["CRITICAL"] > 0 or counts["HIGH"] > 0) else ("WARNING" if deducted > 0 else "PASS")
 
             domain_details.append(
                 DomainScoreDetail(
@@ -1428,58 +1647,30 @@ class ComprehensiveAuditScorer:
                 )
             )
 
-        # 致命的欠陥ハードキャップ制（見せかけの高得点を物理遮断）
         final_score = raw_total
         cap_applied = False
         cap_reason = "キャップ適用なし（重大な未解決脆弱性なし）"
 
         if total_sev_counts["CRITICAL"] > 0:
-            if final_score > 49:
-                final_score = 49
-                cap_applied = True
+            cap_applied = final_score > 49
+            final_score = min(final_score, 49)
             cap_reason = (
                 f"CRITICAL（致命的弱点）が {total_sev_counts['CRITICAL']} 件残存しているため、"
-                "素点合計に関わらず最高得点を 49点（Grade D: 本番公開不可）に上限固定（ハードキャップ）しました。"
+                "素点合計に関わらず最高得点を 49点（Grade D: CRITICAL候補あり）に上限固定（ハードキャップ）しました。"
             )
         elif total_sev_counts["HIGH"] > 0:
-            if final_score > 69:
-                final_score = 69
-                cap_applied = True
+            cap_applied = final_score > 69
+            final_score = min(final_score, 69)
             cap_reason = (
                 f"HIGH（高リスク弱点: IDOR/XSS/コマンド注入等）が {total_sev_counts['HIGH']} 件残存しているため、"
-                "素点合計に関わらず最高得点を 69点（Grade C: リリース前修正必須）に上限固定（ハードキャップ）しました。"
+                "素点合計に関わらず最高得点を 69点（Grade C: HIGH候補あり）に上限固定（ハードキャップ）しました。"
             )
 
-        # グレードと判定
-        if final_score >= 95:
-            grade = "S"
-            verdict = "NO_MATCH_IN_STATIC_SCOPE (静的パターン検査の範囲では一致なし・安全保証ではない)"
-        elif final_score >= 85:
-            grade = "A"
-            verdict = "NO_MATCH_IN_STATIC_SCOPE (一致は軽微・安全保証ではない)"
-        elif final_score >= 70:
-            grade = "B"
-            verdict = "CONDITIONAL_PASS (中程度のリスクあり・計画的修正推奨)"
-        elif final_score >= 50:
-            grade = "C"
-            verdict = "CONDITIONAL_FIX_REQUIRED (高リスク残存・本番公開前に修正必須)"
-        elif final_score >= 30:
-            grade = "D"
-            verdict = "BLOCK_CRITICAL_RISK (致命的リスク残存・即時修正が必要)"
-        else:
-            grade = "F"
-            verdict = "BLOCK_CRITICAL_RISK (全面的なセキュリティ再設計が必要)"
-
-        # 監査カバレッジ率（静的＋構造解析＋モード深さ）
-        base_cov = 65 if mode == "quick" else (80 if mode == "standard" else 90)
-        if status != "completed" or budget_limit_reached:
-            base_cov = min(base_cov, 40)
-        if topology.total_files_scanned == 0:
-            base_cov = 20
+        grade, verdict = self._resolve_grade_and_verdict(final_score)
 
         exec_summary = (
             f"総合セキュリティ監査スコアは **{final_score} / 100点（Grade {grade}）**、判定は **{verdict}** です。"
-            f"（素点合計: {raw_total}点 / 監査カバレッジ推定: {base_cov}%）。"
+            f"（素点合計: {raw_total}点 / 静的検査の参考値。カバレッジは算出不可）。"
         )
         if cap_applied:
             exec_summary += f" ⚠️ {cap_reason}"
@@ -1492,7 +1683,7 @@ class ComprehensiveAuditScorer:
             verdict=verdict,
             cap_applied=cap_applied,
             cap_reason=cap_reason,
-            audit_coverage_percent=base_cov,
+            audit_coverage_percent=None,
             domain_scores=domain_details,
             executive_summary=exec_summary,
         )
@@ -1514,7 +1705,9 @@ def _build_maintenance_proposal_md(
     total_apps = len(topology.subprojects_detected)
     total_routes = topology.api_endpoints_estimated
 
-    if crit_count > 0 or total_apps >= 5 or total_routes >= 30:
+    if scorecard.final_score is None:
+        recommended_plan = "要追加検査（検査範囲・失敗原因を確認してから提案）"
+    elif crit_count > 0 or total_apps >= 5 or total_routes >= 30:
         recommended_plan = "Enterprise（全社・複数プロダクト統治＆緊急是正プラン）"
     elif high_count > 0 or scorecard.final_score < 85 or total_routes >= 5:
         recommended_plan = "Standard（標準・継続ホワイトハッカー監査＆改修伴走プラン）"
@@ -1527,13 +1720,18 @@ def _build_maintenance_proposal_md(
         f"  - 📉 **想定される経営損失**: {f.estimated_loss_scenario}"
         for f in findings[:5]
     ]
-    urgent_list_md = "\n".join(urgent_items) if urgent_items else "- 初期診断における重大な未解決ホールはありません（高水準の維持・監視フェーズへ移行可能）。"
+    urgent_list_md = "\n".join(urgent_items) if urgent_items else "- パターン一致候補なし。未検証・対象外の領域があり、安全性や公開可否は判定していません。"
 
     proposal_md = f"""# 🛡️ サイバーセキュリティ継続保守プログラム ご提案書
 
 - **対象組織 / プロジェクト**: `{topology.root_path}`
 - **初回監査実施日 / 実行ID**: `{metadata.completed_at[:10]}` (`{metadata.run_id}`)
-- **現在の総合セキュリティ得点**: **{scorecard.final_score} / 100 点（Grade `{scorecard.grade}`）**
+- **実行状態**: `{metadata.status}`（completedもローカル静的検査の完了のみ）
+- **現在の静的検査参考値**: **{_score_text(scorecard)}（Grade `{scorecard.grade}`）**
+- **検査範囲・除外・失敗**: `{json.dumps(metadata.scan_scope, ensure_ascii=False)}`
+- **外部ツール**: `{json.dumps(metadata.external_tools, ensure_ascii=False)}`
+- **ホスト検査**: `{json.dumps(metadata.host_audit, ensure_ascii=False)}`
+- **未検証**: 動的な認可・HTTP応答・DB権限・クラウドIAM・依存CVE。公開可否は判定しません。
 - **推奨保守プラン**: **{recommended_plan}**
 
 ---
@@ -1614,8 +1812,8 @@ def _build_html_report(
     """100点満点スコアゲージ・6大領域レーダー棒グラフ・組織構造マップ付きの監査HTMLダッシュボード"""
     score_color = (
         "#10b981"
-        if scorecard.final_score >= 85
-        else ("#f59e0b" if scorecard.final_score >= 70 else "#ef4444")
+        if scorecard.final_score is not None and scorecard.final_score >= 85
+        else ("#f59e0b" if scorecard.final_score is not None and scorecard.final_score >= 70 else "#64748b")
     )
 
     domain_rows_html = []
@@ -1652,7 +1850,8 @@ def _build_html_report(
                 <h3>{html.escape(f.title)}</h3>
                 <span class="risk-pill">3軸リスク値: {f.risk_priority_score} / 125</span>
               </div>
-              <p class="meta"><strong>監査領域:</strong> {html.escape(f.domain_key)} ｜ <strong>担当AI:</strong> {html.escape(f.role)} ｜ <strong>場所:</strong> <code>{html.escape(f.file_path)}:{f.line_number}</code></p>
+              <p class="meta"><strong>監査領域:</strong> {html.escape(f.domain_key)} ｜ <strong>検査ルール群:</strong> {html.escape(f.role)} ｜ <strong>場所:</strong> <code>{html.escape(f.file_path)}:{f.line_number}</code></p>
+              <p><strong>検証状態:</strong> {html.escape(f.verification_status)}（候補・要手動確認）</p>
               <div class="exec-box">
                 <p style="margin:0 0 8px 0;"><strong>💡 IT専門用語なしで言うと？（たとえ話）:</strong><br>{html.escape(f.plain_explanation)}</p>
                 <p style="margin:0 0 8px 0;"><strong>💼 なぜ経営・事業に関わるのか？:</strong><br>{html.escape(f.management_impact)}</p>
@@ -1679,7 +1878,7 @@ def _build_html_report(
     cards_section = (
         "\n".join(cards_html)
         if cards_html
-        else '<div class="empty">✅ 今回の検査範囲では、再現確認されたセキュリティホールは 0 件です。</div>'
+        else '<div class="empty">パターン一致候補なし。未検査・未検証の領域があり、安全性・公開可否は判定していません。</div>'
     )
 
     boundaries_li = "".join(f"<li>{html.escape(b)}</li>" for b in topology.trust_boundaries)
@@ -1694,7 +1893,7 @@ def _build_html_report(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>包括的組織セキュリティ監査レポート ({scorecard.final_score}/100点 - {html.escape(metadata.run_id)})</title>
+<title>静的検査レポート ({_score_text(scorecard)} - {html.escape(metadata.run_id)})</title>
 <style>
   body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 32px; line-height: 1.6; }}
   .container {{ max-width: 1020px; margin: 0 auto; }}
@@ -1732,16 +1931,20 @@ def _build_html_report(
       <h1 style="margin:0 0 8px 0;font-size:24px;">🛡️ 包括的組織セキュリティ監査レポート</h1>
       <p style="margin:0 0 8px 0;font-size:15px;"><strong>総合判定:</strong> {html.escape(scorecard.verdict)}</p>
       <p style="margin:0;font-size:13px;color:#94a3b8;">
-        対象: <code>{html.escape(metadata.target)}</code> ｜ 素点合計: {scorecard.raw_score}/100点 ｜ カバレッジ率: 算出不可（静的パターン検査のため） ｜ 誤検知除外: {metadata.false_positives_filtered}件
+        対象: <code>{html.escape(metadata.target)}</code> ｜ 状態: {html.escape(metadata.status)} ｜ カバレッジ率: 算出不可（静的パターン検査のため） ｜ 候補除外: {metadata.false_positives_filtered}件
       </p>
     </div>
     <div class="score-box">
-      <div class="score-num">{scorecard.final_score}<span style="font-size:20px;color:#94a3b8;">/100</span></div>
+      <div class="score-num">{_score_text(scorecard)}</div>
       <div class="score-grade">Grade {html.escape(scorecard.grade)}</div>
     </div>
   </div>
 
   {cap_banner}
+  <div class="panel"><h2>実施範囲・未検査・失敗</h2>
+    <p>状態: {html.escape(metadata.status)}。completedはローカル静的検査の完了のみ。公開可否は判定しません。</p>
+    <pre>{html.escape(json.dumps({'scan_scope': metadata.scan_scope, 'external_tools': metadata.external_tools, 'host_audit': metadata.host_audit}, ensure_ascii=False, indent=2))}</pre>
+  </div>
   <div class="cap-alert" style="background:#422006;border-color:#f59e0b;color:#fde68a;">⚠️ 本スコアは静的パターン検査（正規表現）の<strong>参考値</strong>です。一致なし＝安全ではなく、一致した項目も手動確認が必要です。ペネトレーションテスト・専門家レビューの代替ではありません。</div>
 
   <div class="panel" style="margin-bottom:24px;border-color:#818cf8;background:#1e1b4b;">
@@ -1762,7 +1965,7 @@ def _build_html_report(
       {"".join(domain_rows_html)}
     </div>
     <div class="panel">
-      <h2>🏗️ 組織・システム構造の全体像 (Topology Map)</h2>
+      <h2>🏗️ 静的ファイル棚卸し（実構成は未検証）</h2>
       <ul style="font-size:14px;padding-left:20px;margin:0;">
         <li><strong>検出サブプロジェクト:</strong> {html.escape(", ".join(topology.subprojects_detected))}</li>
         <li><strong>技術スタック:</strong> {html.escape(", ".join(topology.tech_stack_summary))}</li>
@@ -1770,7 +1973,7 @@ def _build_html_report(
         <li><strong>レイヤー構成:</strong> 画面UI({topology.layer_file_counts['frontend_ui']}) / API({topology.layer_file_counts['backend_api']}) / DB({topology.layer_file_counts['data_db']}) / Infra({topology.layer_file_counts['infra_ci_config']}) / AI統治({topology.layer_file_counts['ai_agents_governance']})</li>
         <li><strong>.env Git保護:</strong> {"✅ 保護済み" if topology.has_gitignore_env_protection else "⚠️ 未保護"} ｜ <strong>自動テスト:</strong> {"✅ あり" if topology.has_automated_tests else "⚠️ 未検出"}</li>
       </ul>
-      <h4 style="margin:14px 0 6px 0;color:#93c5fd;font-size:14px;">特定された5つの信頼境界 (Trust Boundaries)</h4>
+      <h4 style="margin:14px 0 6px 0;color:#93c5fd;font-size:14px;">参考の5つの信頼境界（未検証）</h4>
       <ul style="font-size:12px;color:#cbd5e1;padding-left:18px;margin:0;">{boundaries_li}</ul>
     </div>
   </div>
@@ -1852,6 +2055,8 @@ def write_strix_compatible_run(
     findings_dir.mkdir(parents=True, exist_ok=True)
 
     sorted_findings = sorted(findings, key=lambda x: x.risk_priority_score, reverse=True)
+    for finding in sorted_findings:
+        finding.code_snippet = "[SOURCE REDACTED: inspect the indicated file locally]"
     recommended_plan, proposal_md = _build_maintenance_proposal_md(
         metadata, topology, scorecard, sorted_findings
     )
@@ -1903,7 +2108,7 @@ def write_strix_compatible_run(
 ## 1. 技術的な現象（何が起きるか）
 {f.what_happens}
 
-## 2. 再現手順（どうやって確かめたか）
+## 2. 手動確認の提案（このCLIでは実行していません）
 {repro_md}
 
 ### 該当コード箇所
@@ -1954,7 +2159,7 @@ def write_strix_compatible_run(
         "| :--- | :--- | :--- | :--- | :--- | :--- |\n"
         + "\n".join(finding_rows)
         if finding_rows
-        else "✅ **今回の検査範囲では、再現確認された弱点は 0 件でした。**（下の「3つの確認視点」を必ずご確認ください）"
+        else "**パターン一致候補なし。未検査・未検証の領域があり、安全性や公開可否は判定していません。**"
     )
     exec_findings_md = (
         "\n".join(exec_finding_blocks)
@@ -1972,7 +2177,8 @@ def write_strix_compatible_run(
 
 | 項目 | 評価結果 |
 | :--- | :--- |
-| **総合セキュリティ得点** | **{scorecard.final_score} / 100 点** （素点合計: {scorecard.raw_score} / 100 点） |
+| **静的検査参考値** | **{_score_text(scorecard)}** |
+| **実行状態** | `{metadata.status}`（completedもローカル静的検査の完了のみ） |
 | **監査グレード (Grade)** | **Grade `{scorecard.grade}`** |
 | **リリース可否判定 (Verdict)** | **{scorecard.verdict}** |
 | **致命的欠陥キャップ判定** | {scorecard.cap_reason} |
@@ -1999,6 +2205,14 @@ def write_strix_compatible_run(
 
 {domain_table_md}
 
+## 実施範囲・未検査・失敗
+
+```json
+{json.dumps({'scan_scope': metadata.scan_scope, 'external_tools': metadata.external_tools, 'host_audit': metadata.host_audit}, ensure_ascii=False, indent=2)}
+```
+
+動的な認可・HTTP応答・DB権限・クラウドIAM・依存CVEは未検証です。上記の除外ファイル・ディレクトリも検査範囲に含みません。
+
 ---
 
 ## 🏗️ 3. 組織・システム全構造マップ (Organizational Topology)
@@ -2017,7 +2231,7 @@ def write_strix_compatible_run(
   - 依存パッケージ固定 (Lockfile): `{"あり (OK)" if topology.has_dependency_lockfile else "未検出"}`
   - 自動テストスイート: `{"あり (OK)" if topology.has_automated_tests else "未検出"}`
 
-### 特定された5つの信頼境界 (Trust Boundaries)
+### 参考の5つの信頼境界（未検証）
 {boundaries_md}
 
 ---
@@ -2083,7 +2297,7 @@ class ExternalToolBridge:
         for k, item in enumerate(data or []):
             seq = start_seq + k
             out.append(VulnerabilityFinding(
-                id=f"WH-{seq:03d}", title=f"[gitleaks] {item.get('Description') or item.get('RuleID', 'secret')}",
+                id=f"WH-{seq:03d}", title=f"[gitleaks] {item.get('RuleID', 'secret')}",
                 domain_key="secrets_data", role="External: gitleaks", category=f"gitleaks:{item.get('RuleID', '')}",
                 severity="CRITICAL", severity_score=5, exploitability_score=5, blast_radius_score=5, risk_priority_score=125,
                 verification_status="EXTERNAL_TOOL_REPORTED", file_path=str(item.get("File", "")).replace("\\", "/"),
@@ -2107,8 +2321,8 @@ class ExternalToolBridge:
                 exploitability_score=e_, blast_radius_score=b_, risk_priority_score=s_ * e_ * b_,
                 verification_status="EXTERNAL_TOOL_REPORTED", file_path=str(item.get("path", "")).replace("\\", "/"),
                 line_number=int((item.get("start") or {}).get("line", 0) or 0), code_snippet=str(extra.get("lines", ""))[:200],
-                what_happens=str(extra.get("message", "semgrep ルール一致")), reproduction_steps=["1. semgrep の指摘箇所を手動で確認する。"],
-                root_cause=f"semgrep ルール `{rule}` に一致。", remediation=str(extra.get("fix", "ルールの推奨修正に従う。")),
+                what_happens="semgrepルールに一致。ソース値を含み得る外部メッセージは転載しません。", reproduction_steps=["1. semgrep の指摘箇所を手動で確認する。"],
+                root_cause=f"semgrep ルール `{rule}` に一致。", remediation="ルールと該当箇所をローカルで確認して修正する。",
                 patch_example="# semgrep ルールの説明を参照",
             ))
         return out
@@ -2119,28 +2333,46 @@ class ExternalToolBridge:
 
         findings: List[VulnerabilityFinding] = []
         notes: List[str] = []
+        self.status: Dict[str, Any] = {}
         gl = shutil.which("gitleaks")
         if gl:
-            with _tf.TemporaryDirectory() as td:
-                rp = os.path.join(td, "gl.json")
-                subprocess.run([gl, "detect", "--no-git", "--redact", "--source", target, "--report-format", "json", "--report-path", rp],
-                               capture_output=True, text=True, timeout=300, check=False)
-                if os.path.exists(rp):
-                    findings += self.parse_gitleaks(json.load(open(rp, encoding="utf-8")), start_seq)
-                    notes.append("gitleaks: 実行済み")
+            try:
+                with _tf.TemporaryDirectory() as td:
+                    rp = os.path.join(td, "gl.json")
+                    proc = subprocess.run([gl, "detect", "--no-git", "--redact", "--source", target, "--report-format", "json", "--report-path", rp],
+                                          capture_output=True, text=True, timeout=300, check=False)
+                    if proc.returncode not in (0, 1):
+                        raise ValueError("nonzero_exit")
+                    with open(rp, encoding="utf-8") as report:
+                        data = json.load(report)
+                    if not isinstance(data, list) or not all(isinstance(x, dict) for x in data):
+                        raise ValueError("invalid_json_schema")
+                    added = self.parse_gitleaks(data, start_seq)
+                    findings += added
+                    self.status['gitleaks'] = {'status': 'completed', 'finding_count': len(added)}
+            except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError, AttributeError):
+                self.status['gitleaks'] = {'status': 'failed', 'reason': 'execution_or_report_error'}
         else:
-            notes.append("gitleaks: 未導入（スキップ）")
+            self.status['gitleaks'] = {'status': 'unavailable', 'reason': 'not_installed'}
         sg = shutil.which("semgrep")
         if sg:
-            proc = subprocess.run([sg, "--config", semgrep_config, "--json", "--metrics=off", "--quiet", target],
-                                  capture_output=True, text=True, timeout=900, check=False)
             try:
-                findings += self.parse_semgrep(json.loads(proc.stdout or "{}"), start_seq + len(findings))
-                notes.append(f"semgrep: 実行済み (config={semgrep_config})")
-            except json.JSONDecodeError:
-                notes.append("semgrep: 出力を解析できませんでした")
+                proc = subprocess.run([sg, "--config", semgrep_config, "--json", "--metrics=off", "--quiet", target],
+                                      capture_output=True, text=True, timeout=900, check=False)
+                if proc.returncode not in (0, 1):
+                    raise ValueError("nonzero_exit")
+                data = json.loads(proc.stdout)
+                if (not isinstance(data, dict) or not isinstance(data.get('results'), list)
+                    or not all(isinstance(x, dict) for x in data['results']) or data.get('errors')):
+                    raise ValueError("invalid_or_incomplete_json_report")
+                added = self.parse_semgrep(data, start_seq + len(findings))
+                findings += added
+                self.status['semgrep'] = {'status': 'completed', 'finding_count': len(added)}
+            except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError, AttributeError):
+                self.status['semgrep'] = {'status': 'failed', 'reason': 'execution_or_report_error'}
         else:
-            notes.append("semgrep: 未導入（スキップ）")
+            self.status['semgrep'] = {'status': 'unavailable', 'reason': 'not_installed'}
+        notes = [f"{name}: {detail['status']}" for name, detail in self.status.items()]
         return findings, notes
 
 
@@ -2165,6 +2397,7 @@ class HostPostureAuditor:
         findings: List[VulnerabilityFinding] = []
         seq = start_seq
         os_name = platform.system()
+        self.checks: Dict[str, Any] = {'firewall': {'status': 'not_applicable'}, 'ports': {'status': 'not_run'}}
 
         # 1. Windows ファイアウォール状態の確認 (Windows環境のみ・読み取り専用)
         if os_name == "Windows":
@@ -2177,6 +2410,9 @@ class HostPostureAuditor:
                     check=False,
                 )
                 out = proc.stdout or ""
+                if proc.returncode != 0 or not re.search(r'State\s+(ON|OFF)|状態\s+(オン|オフ)', out, re.I):
+                    raise ValueError("firewall_status_unavailable")
+                self.checks['firewall'] = {'status': 'completed'}
                 if re.search(r"State\s+OFF|状態\s+オフ", out, re.IGNORECASE):
                     findings.append(
                         VulnerabilityFinding(
@@ -2204,8 +2440,9 @@ class HostPostureAuditor:
                         )
                     )
                     seq += 1
-            except Exception:
-                pass
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                self.checks['firewall'] = {'status': 'failed', 'reason': 'command_failed_or_unreadable'}
+                logger.debug("Windows firewall check failed: %s", type(exc).__name__)
 
         # 2. 全インターフェース(0.0.0.0)で待ち受けている危険ポートの確認 (読み取り専用 netstat)
         try:
@@ -2217,11 +2454,14 @@ class HostPostureAuditor:
                 check=False,
             )
             net_out = proc.stdout or ""
+            if proc.returncode != 0 or not net_out.strip():
+                raise ValueError("ports_status_unavailable")
+            self.checks['ports'] = {'status': 'completed'}
             exposed_ports = set()
             for line in net_out.splitlines():
                 if "LISTEN" not in line.upper():
                     continue
-                m = re.search(r"(?:0\.0\.0\.0|\*|\[::\]):(\d+)\s", line)
+                m = re.search(r"(?:0\.0\.0\.0|\*|\[::\])[:.](\d+)\s", line)
                 if m:
                     port_num = int(m.group(1))
                     if port_num in self.HIGH_RISK_PORTS and port_num not in exposed_ports:
@@ -2245,7 +2485,7 @@ class HostPostureAuditor:
                                 code_snippet=line.strip(),
                                 what_happens=(
                                     f"ポート {port_num} ({pname}) が `0.0.0.0`（外部ネットワーク全体）に対して待ち受け状態になっており、"
-                                    "ランサムウェア感染やパスワード総当たり攻撃の直接的な侵入窓口になります。"
+                                    "インターネットからの到達可能性は未検証です。ファイアウォール等の経路も確認してください。"
                                 ),
                                 reproduction_steps=[
                                     f"1. `netstat -an` で `0.0.0.0:{port_num}` が LISTEN 状態であることを確認。"
@@ -2256,8 +2496,9 @@ class HostPostureAuditor:
                             )
                         )
                         seq += 1
-        except Exception:
-            pass
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            self.checks['ports'] = {'status': 'failed', 'reason': 'command_failed_or_unreadable'}
+            logger.debug("Host port netstat check failed: %s", type(exc).__name__)
 
         return findings
 
@@ -2290,41 +2531,60 @@ def run_scan_command(args: argparse.Namespace) -> int:
                 "infra_ci_config": 0,
                 "ai_agents_governance": 0,
             },
-            api_endpoints_estimated=1,
-            has_gitignore_env_protection=True,
-            has_dependency_lockfile=True,
+            api_endpoints_estimated=0,
+            has_gitignore_env_protection=False,
+            has_dependency_lockfile=False,
             has_automated_tests=False,
             ai_agent_configs_count=0,
-            trust_boundaries=["External HTTP Client ➔ Staging Server"],
+            trust_boundaries=["URL動的検査は未実装。通信・構成は未検証。"],
         )
 
-    if getattr(args, "with_external", False) and target_type != "staging_url":
-        ext_findings, ext_notes = ExternalToolBridge().run(
-            msg_or_path, len(findings) + 1, getattr(args, "semgrep_config", "auto")
-        )
-        findings.extend(ext_findings)
-        for note in ext_notes:
-            print(f"  [external] {note}")
+    external_status: Dict[str, Any] = {}
+    if getattr(args, "with_external", False):
+        if target_type == "staging_url" or scanner.scope.incomplete or files_scanned == 0:
+            external_status = {'requested': {'status': 'not_run', 'reason': 'unsupported_or_incomplete_local_scope'}}
+        else:
+            bridge = ExternalToolBridge()
+            ext_findings, ext_notes = bridge.run(
+                msg_or_path, len(findings) + 1, getattr(args, "semgrep_config", "auto")
+            )
+            findings.extend(ext_findings)
+            external_status = bridge.status
+            for note in ext_notes:
+                print(f"  [external] {note}")
 
+    host_status: Dict[str, Any] = {}
     if getattr(args, "include_host_audit", False):
-        host_findings = HostPostureAuditor().audit_local_host(start_seq=len(findings) + 1)
+        auditor = HostPostureAuditor()
+        host_findings = auditor.audit_local_host(start_seq=len(findings) + 1)
         findings.extend(host_findings)
+        host_status = auditor.checks
         topology.tech_stack_summary.append(f"Host OS ({platform.system()})")
 
+    requested_check_failed = any(v['status'] not in ('completed', 'not_applicable')
+                                 for v in list(external_status.values()) + list(host_status.values()))
+    if target_type == 'staging_url':
+        status = 'unsupported'
+    elif scanner.scope.incomplete or requested_check_failed:
+        status = 'partial'
+    elif files_scanned == 0:
+        status = 'unsupported'
+    else:
+        status = 'completed'
     scorecard = ComprehensiveAuditScorer().evaluate(
         findings=findings,
         topology=topology,
         mode=args.mode,
-        status="completed",
+        status=status,
         budget_limit_reached=False,
     )
 
     completed = dt.datetime.now(dt.timezone.utc).isoformat()
-    run_id = dt.datetime.now().strftime("run_%Y%m%d_%H%M%S_%f")
+    run_id = dt.datetime.now(dt.timezone.utc).strftime("run_%Y%m%d_%H%M%S_%f")
 
     metadata = RunMetadata(
         run_id=run_id,
-        status="completed",
+        status=status,
         target=args.target,
         target_type=target_type,
         mode=args.mode,
@@ -2340,17 +2600,17 @@ def run_scan_command(args: argparse.Namespace) -> int:
         overall_score=scorecard.final_score,
         overall_grade=scorecard.grade,
         overall_verdict=scorecard.verdict,
+        scan_scope=asdict(scanner.scope),
+        external_tools=external_status,
+        host_audit=host_status,
         coverage={
-            "access_control_idor": "checked (25pts: route handler ownership & RBAC analysis)",
-            "auth_session": "checked (15pts: JWT signature & session cookie verification)",
-            "input_injection_xss": "checked (20pts: SQLi, Command Injection, XSS, SSRF)",
-            "secrets_and_data": "checked (15pts: hardcoded secrets, NEXT_PUBLIC_/web.config leaks, .env hygiene)",
-            "infra_supply_chain": "checked (15pts: CORS, debug flags, lockfile & host port/firewall hygiene)",
-            "ai_governance_resilience": "checked (10pts: dynamic eval/exec guard, silent failure check)",
+            **{key: 'static_patterns_only' if files_scanned else 'not_run'
+               for key in ('access_control_idor', 'auth_session', 'input_injection_xss',
+                           'secrets_and_data', 'infra_supply_chain', 'ai_governance_resilience')},
             "untested_blind_spots": "マルチテナント実DB環境での管理者権限昇格・外部決済Webhook署名・本番クラウドIAMポリシーは別途動的検証が必要",
         },
         three_point_zero_check={
-            "1_completion_status": "status=completed（途中停止せず最後まで完走済み）",
+            "1_completion_status": f"status={status}（ローカル静的検査。対象外・未検証領域を含む安全保証ではありません）",
             "2_budget_stop_check": f"上限 ${args.max_budget:.2f} に対し追加API課金 $0.00（予算到達による途中打ち切りなし）",
             "3_coverage_and_blind_spots": (
                 f"組織内の {files_scanned} ファイル（推定API窓口 {topology.api_endpoints_estimated} 箇所、カバレッジ率は算出不可）を検査済み。"
@@ -2362,8 +2622,8 @@ def run_scan_command(args: argparse.Namespace) -> int:
 
     out_base = Path(args.output_dir).expanduser().resolve()
     run_dir = write_strix_compatible_run(out_base, metadata, topology, scorecard, findings)
-    print(f"[OK] 包括セキュリティ監査完了: {run_dir}")
-    print(f"  🏆 総合セキュリティ得点: {scorecard.final_score} / 100 点 (Grade {scorecard.grade} / 素点 {scorecard.raw_score} 点)")
+    print(f"[REPORT] 静的検査 status={status}: {run_dir}")
+    print(f"  静的検査参考値: {_score_text(scorecard)} (Grade {scorecard.grade})")
     print(f"  ⚖️  判定 (Verdict): {scorecard.verdict}")
     if scorecard.cap_applied:
         print(f"  ⚠️  キャップ適用: {scorecard.cap_reason}")
@@ -2374,7 +2634,7 @@ def run_scan_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "open", False) and (run_dir / "report.html").exists():
         _open_in_browser(run_dir / "report.html")
-    return 0
+    return 0 if status == 'completed' else 3
 
 
 def run_view_command(args: argparse.Namespace) -> int:
@@ -2401,6 +2661,34 @@ def run_view_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def demo_sources() -> Tuple[str, str]:
+    """Executable local teaching model; no web server or dependency required."""
+    before = '''from types import SimpleNamespace
+
+class LocalDemoApp:
+    def get(self, path):
+        return lambda handler: handler
+
+app = LocalDemoApp()
+ORDERS = {
+    1001: SimpleNamespace(id=1001, user_id="user_a", item="ワイヤレスイヤホン"),
+    1002: SimpleNamespace(id=1002, user_id="user_b", item="ゲーミングPC"),
+}
+
+@app.get("/orders/{order_id}")
+def get_order(order_id: int, current_user):
+    order = ORDERS.get(order_id)
+    if order is None:
+        raise KeyError("order not found")
+    return order
+'''
+    after = before.replace('    return order\n',
+                           '    if order.user_id != current_user.id:\n'
+                           '        raise PermissionError("other user order")\n'
+                           '    return order\n')
+    return before, after
+
+
 def run_demo_command(args: argparse.Namespace) -> int:
     """
     初心者向け1コマンド体験デモ:
@@ -2418,22 +2706,8 @@ def run_demo_command(args: argparse.Namespace) -> int:
 
         print("\n[Step 1] サンプルアプリ（注文確認API）を用意しています...")
         print("  ⚠️ 弱点: ログイン確認はありますが、「注文の持ち主本人か」の確認が抜けています。")
-        app_file.write_text(
-            """from fastapi import FastAPI, Depends, HTTPException
-
-app = FastAPI()
-ORDERS = {
-    1001: {"id": 1001, "user_id": "user_a", "item": "ワイヤレスイヤホン"},
-    1002: {"id": 1002, "user_id": "user_b", "item": "ゲーミングPC"},
-}
-
-@app.get("/orders/{order_id}")
-def get_order(order_id: int, current_user=Depends(get_logged_in_user)):
-    order = ORDERS.get(order_id)
-    return order
-""",
-            encoding="utf-8",
-        )
+        before, after = demo_sources()
+        app_file.write_text(before, encoding="utf-8")
 
         print("\n[Step 2] 1回目の包括セキュリティ監査を実行します...")
         scan_args = argparse.Namespace(
@@ -2448,32 +2722,36 @@ def get_order(order_id: int, current_user=Depends(get_logged_in_user)):
         run_scan_command(scan_args)
 
         print("\n[Step 3] 弱点の根本原因（注文の持ち主確認）をプログラムに追記して直します...")
-        app_file.write_text(
-            """from fastapi import FastAPI, Depends, HTTPException
-
-app = FastAPI()
-ORDERS = {
-    1001: {"id": 1001, "user_id": "user_a", "item": "ワイヤレスイヤホン"},
-    1002: {"id": 1002, "user_id": "user_b", "item": "ゲーミングPC"},
-}
-
-@app.get("/orders/{order_id}")
-def get_order(order_id: int, current_user=Depends(get_logged_in_user)):
-    order = ORDERS.get(order_id)
-    if order.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="他人の注文は閲覧できません")
-    return order
-""",
-            encoding="utf-8",
-        )
+        app_file.write_text(after, encoding="utf-8")
 
         print("\n[Step 4] 修正後に2回目の包括セキュリティ監査を実行します...")
         run_scan_command(scan_args)
 
     print("\n" + "=" * 76)
-    print("🎉 デモ完了！ 1回目（69点・Grade C）から、修正後の2回目で 100点（Grade S）へ改善されました。")
+    # Exercise the fixed teaching model rather than treating a changed score as
+    # evidence of correctness. Only this bundled synthetic source is executed.
+    from types import SimpleNamespace
+    namespace: Dict[str, Any] = {}
+    exec(compile(after, '<bundled local demo>', 'exec'), namespace)
+    handler = namespace['get_order']
+    user = SimpleNamespace(id='user_a')
+    checks = {'owner_allowed': handler(1001, user).id == 1001}
+    try:
+        handler(1002, user)
+        checks['other_user_denied'] = False
+    except PermissionError:
+        checks['other_user_denied'] = True
+    try:
+        handler(9999, user)
+        checks['missing_order_rejected'] = False
+    except KeyError:
+        checks['missing_order_rejected'] = True
+    latest_run = sorted(p for p in out_dir.glob('run_*') if p.is_dir())[-1]
+    (latest_run / 'demo_runtime_checks.json').write_text(json.dumps(checks, indent=2), encoding='utf-8')
+    print("デモ完了: 固定パッチの教材モデル。本人・他人・不存在IDを実行確認しました。HTTPサーバーの検証や汎用AI修正ではありません。")
+    print("静的参考値は69点から100点へ。100点は安全保証・公開許可ではありません。")
     print("=" * 76)
-    return 0
+    return 0 if all(checks.values()) else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2495,7 +2773,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-m",
         choices=["quick", "standard", "deep"],
         default="standard",
-        help="検査の深さ (quick: 数分 / standard: 標準 / deep: 徹底)",
+        help="静的検査のファイル上限 (quick: 80 / standard: 400 / deep: 2500。動的検査ではありません)",
     )
     p_scan.add_argument(
         "--max-budget",

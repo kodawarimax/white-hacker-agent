@@ -7,7 +7,7 @@
     [switch]$IncludeHost
 )
 
-$ErrorActionPreference = "Continue"
+$ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -27,7 +27,9 @@ function Find-WorkingPython {
             if ($LASTEXITCODE -eq 0 -and $ver -match "Python 3") {
                 return $cmd
             }
-        } catch {}
+        } catch {
+            Write-Verbose "Python runtime check skipped for $cmd"
+        }
     }
     return $null
 }
@@ -41,7 +43,9 @@ function Select-TargetFolderDialog {
         if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             return $dialog.SelectedPath
         }
-    } catch {}
+    } catch {
+        Write-Verbose "Folder dialog unavailable; falling back to repository root"
+    }
     return $RepoRoot
 }
 
@@ -49,18 +53,22 @@ function Invoke-NativePowerShellAudit {
     param([string]$ScanPath)
 
     Write-Host "[INFO] Python未導入のWindows環境のため、Windows標準PowerShellネイティブ監査エンジンで実行します..." -ForegroundColor Yellow
-    $runId = "run_" + (Get-Date -Format "yyyyMMdd_HHmmss")
+    $runId = "run_" + (Get-Date -Format "yyyyMMdd_HHmmss_fffffff")
     $runDir = Join-Path $OutputDir $runId
     $findingsDir = Join-Path $runDir "findings"
     New-Item -ItemType Directory -Force -Path $findingsDir | Out-Null
 
     $findings = @()
     $seq = 1
+    $scope = @{ selected_files = 0; scanned_files = 0; candidate_files = 0; symlinks = 0; read_errors = 0; oversize_files = 0; enumeration_errors = 0; file_limit_reached = $false }
+    $hostChecks = @{ requested = [bool]$doHost; firewall = "not_requested"; ports = "not_requested" }
 
     # 1. Windows ファイアウォール検査 (読み取り専用)
     try {
         if (-not $doHost) { throw "host audit not consented" }
         $fwOut = (netsh advfirewall show allprofiles 2>$null) -join "`n"
+        if ($LASTEXITCODE -ne 0 -or $fwOut -notmatch "State\s+(ON|OFF)|状態\s+(オン|オフ)") { throw "unreadable firewall status" }
+        $hostChecks.firewall = "completed"
         if ($fwOut -match "State\s+OFF|状態\s+オフ") {
             $findings += [PSCustomObject]@{
                 id = ("WH-{0:D3}" -f $seq); title = "Windowsファイアウォールの無効化（不正通信の素通りリスク）"
@@ -74,7 +82,10 @@ function Invoke-NativePowerShellAudit {
             }
             $seq++
         }
-    } catch {}
+    } catch {
+        if ($doHost) { $hostChecks.firewall = "failed" }
+        Write-Verbose "Firewall check failed or was not requested; see host_audit"
+    }
 
     # 2. 危険な外部開放ポート検査 (読み取り専用 netstat)
     $riskyPorts = @{
@@ -84,6 +95,8 @@ function Invoke-NativePowerShellAudit {
     try {
         if (-not $doHost) { throw "host audit not consented" }
         $netLines = netstat -an 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $netLines) { throw "unreadable ports" }
+        $hostChecks.ports = "completed"
         $seenPorts = @{}
         foreach ($line in $netLines) {
             if ($line -match "LISTENING" -and $line -match "(?:0\.0\.0\.0|\[\:\:\]):(\d+)\s") {
@@ -105,22 +118,44 @@ function Invoke-NativePowerShellAudit {
                 }
             }
         }
-    } catch {}
+    } catch {
+        if ($doHost) { $hostChecks.ports = "failed" }
+        Write-Verbose "Netstat check failed or was not requested; see host_audit"
+    }
+
+    # Enumerate one directory at a time: do not traverse junctions/reparse points.
+    function Get-AuditFiles {
+        param([string]$PathToInspect)
+        try { $entry = Get-Item -LiteralPath $PathToInspect -ErrorAction Stop }
+        catch { $scope.enumeration_errors++; return }
+        if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { $scope.symlinks++; return }
+        if (-not $entry.PSIsContainer) {
+            if ($entry.Name -in @("white_hacker_runner.py", "Run_Windows_Audit.ps1")) { return }
+            if ($entry.Extension -in @(".py",".ts",".tsx",".js",".jsx",".json",".yaml",".yml",".cs",".config",".ps1",".bat",".env",".php",".sql")) {
+                $scope.candidate_files++
+                if ($scope.selected_files -lt 300) { $scope.selected_files++; $entry }
+                else { $scope.file_limit_reached = $true }
+            }
+            return
+        }
+        try { $children = @(Get-ChildItem -LiteralPath $PathToInspect -Force -ErrorAction Stop | Sort-Object Name) }
+        catch { $scope.enumeration_errors++; return }
+        foreach ($child in $children) {
+            if ($child.PSIsContainer -and $child.Name -in @("node_modules", ".git", ".next", "dist", "build", "bin", "obj", "strix_runs")) { continue }
+            Get-AuditFiles -PathToInspect $child.FullName
+        }
+    }
 
     # 3. 対象フォルダ内のソースコード・設定ファイル検査
     $files = @()
-    if (Test-Path $ScanPath) {
-        $files = Get-ChildItem -Path $ScanPath -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.FullName -notmatch "\\(node_modules|\.git|\.next|dist|build|bin|obj|strix_runs)\\" -and
-                $_.Extension -in @(".py",".ts",".tsx",".js",".jsx",".json",".yaml",".yml",".cs",".config",".ps1",".bat",".env",".php",".sql") -and
-                $_.Name -ne "white_hacker_runner.py" -and $_.Name -ne "Run_Windows_Audit.ps1"
-            } | Select-Object -First 300
-    }
+    $files = @(Get-AuditFiles -PathToInspect $ScanPath)
 
     foreach ($f in $files) {
         # 1行ファイルでも必ず配列として扱う（文字列のまま添字参照すると1文字目になり見逃す）
-        $lines = @(Get-Content -Path $f.FullName -ErrorAction SilentlyContinue)
+        if ($f.Attributes -band [IO.FileAttributes]::ReparsePoint) { $scope.symlinks++; continue }
+        if ($f.Length -gt 2000000) { $scope.oversize_files++; continue }
+        try { $lines = @(Get-Content -LiteralPath $f.FullName -Encoding UTF8 -ErrorAction Stop); $scope.scanned_files++ }
+        catch { $scope.read_errors++; continue }
         if (-not $lines) { continue }
         for ($i = 0; $i -lt $lines.Count; $i++) {
             $ln = [string]$lines[$i]
@@ -166,29 +201,28 @@ function Invoke-NativePowerShellAudit {
         }
     }
 
-    # スコア計算 (100点満点 + 致命的欠陥ハードキャップ)
-    $critCount = @($findings | Where-Object { $_.severity -eq "CRITICAL" }).Count
-    $highCount = @($findings | Where-Object { $_.severity -eq "HIGH" }).Count
-    $medCount = @($findings | Where-Object { $_.severity -eq "MEDIUM" }).Count
-    $rawScore = [Math]::Max(0, 100 - ($critCount * 15) - ($highCount * 10) - ($medCount * 4))
-    $finalScore = $rawScore
-    $capReason = "キャップ適用なし"
-    if ($critCount -gt 0 -and $finalScore -gt 49) {
-        $finalScore = 49
-        $capReason = "CRITICAL（致命的弱点）が $critCount 件検出されたため、最高49点（Grade D: 要緊急是正）に上限固定しました。"
-    } elseif ($highCount -gt 0 -and $finalScore -gt 69) {
-        $finalScore = 69
-        $capReason = "HIGH（高リスク弱点）が $highCount 件検出されたため、最高69点（Grade C: 修正必須）に上限固定しました。"
+    # The fallback is a smaller candidate-only engine. It does not implement
+    # the Python six-domain rubric; do not present a comparable numerical score.
+    $status = if ($scope.scanned_files -eq 0 -and $scope.enumeration_errors -eq 0 -and $scope.symlinks -eq 0 -and $scope.oversize_files -eq 0 -and $scope.read_errors -eq 0) { "unsupported" } else { "partial" }
+    $finalScore = "N/A"
+    $grade = "N/A"
+    $capReason = "状態: $status / PowerShell候補検出のみ。点数は算出不可。公開可否は判定しません。"
+    foreach ($item in $findings) {
+        $item.code_snippet = "[SOURCE REDACTED]"
+        $item | Add-Member -NotePropertyName verification_status -NotePropertyValue "PATTERN_MATCH_UNVERIFIED" -Force
     }
-
-    $grade = if ($finalScore -ge 95) { "S" } elseif ($finalScore -ge 85) { "A" } elseif ($finalScore -ge 70) { "B" } elseif ($finalScore -ge 50) { "C" } elseif ($finalScore -ge 30) { "D" } else { "F" }
     $htmlPath = Join-Path $runDir "report.html"
     $summaryPath = Join-Path $runDir "summary.md"
 
     $rowsHtml = ""
     foreach ($item in $findings) {
+        # Encode all dynamic text before inserting it into HTML.
+        $item = $item.PSObject.Copy()
+        foreach ($prop in @("id", "severity", "title", "file_path", "role", "what_happens", "remediation", "patch_example")) {
+            $item.$prop = [System.Net.WebUtility]::HtmlEncode([string]$item.$prop)
+        }
         $rowsHtml += "<div style='background:#1e293b;border:1px solid #334155;border-radius:10px;padding:16px;margin-bottom:14px;'>"
-        $rowsHtml += "<h3 style='margin:0 0 8px 0;color:#f8fafc;'>[$($item.id)] [$($item.severity)] $($item.title)</h3>"
+        $rowsHtml += "<h3 style='margin:0 0 8px 0;color:#f8fafc;'>[$($item.id)] [$($item.severity)] $($item.title)</h3><p>PATTERN_MATCH_UNVERIFIED / 要手動確認</p>"
         $rowsHtml += "<p style='color:#94a3b8;font-size:13px;margin:0 0 8px 0;'>場所: <code>$($item.file_path):$($item.line_number)</code> ｜ 担当: $($item.role)</p>"
         $rowsHtml += "<p><strong>リスク内容（専門用語なし解説）:</strong> $($item.what_happens)</p>"
         $rowsHtml += "<p style='background:#1e1b4b;border-left:4px solid #818cf8;padding:10px;border-radius:6px;color:#e0e7ff;'><strong>💼 なぜ経営に関わるか・想定される損失:</strong> パスワードやデータの漏洩・ランサムウェア感染により、①外部専門調査（フォレンジック）費用や不正利用課金、②個人情報保護法上の報告・通知対応、③取引先からの契約停止・営業停止損失につながる経営リスクです。</p>"
@@ -199,6 +233,8 @@ function Invoke-NativePowerShellAudit {
         $rowsHtml = "<div style='background:#064e3b;padding:18px;border-radius:10px;'>✅ 今回の検査範囲では、重大なセキュリティホールは検出されませんでした。</div>"
     }
 
+    $safeScanPath = [System.Net.WebUtility]::HtmlEncode($ScanPath)
+    $safeScope = [System.Net.WebUtility]::HtmlEncode(($scope | ConvertTo-Json -Compress))
     $htmlContent = @"
 <!DOCTYPE html><html lang="ja"><head><meta charset="utf-8"><title>Windows セキュリティ監査レポート ($finalScore/100点)</title></head>
 <body style="font-family:sans-serif;background:#0f172a;color:#f8fafc;padding:32px;line-height:1.6;">
@@ -206,7 +242,7 @@ function Invoke-NativePowerShellAudit {
   <div style="background:#1e293b;border-left:8px solid #38bdf8;padding:24px;border-radius:12px;margin-bottom:24px;display:flex;justify-content:space-between;align-items:center;">
     <div>
       <h1 style="margin:0 0 8px 0;">🛡️ 簡易セキュリティ監査レポート (Windows PowerShell簡易版)</h1><p style="color:#fbbf24;margin:0 0 8px 0;">⚠️ 静的パターン検査の参考値です。一致なし＝安全ではなく、一致項目も手動確認が必要です。Python版とは検査範囲・点数が一致しません（Python版を推奨）。</p>
-      <p style="margin:0;color:#cbd5e1;">検査対象: <code>$ScanPath</code> ｜ 検査ファイル数: $($files.Count) 件 ｜ $capReason</p>
+      <p style="margin:0;color:#cbd5e1;">検査対象: <code>$safeScanPath</code> ｜ 検査済みファイル数: $($scope.scanned_files) 件 ｜ $capReason</p><pre>$safeScope</pre><p>ホスト検査は読み取りコマンドの候補検出のみ。到達可能性・認可・HTTP応答・DB権限は未検証です。</p>
     </div>
     <div style="text-align:center;background:#020617;padding:16px 28px;border-radius:12px;border:2px solid #38bdf8;">
       <div style="font-size:42px;font-weight:800;color:#38bdf8;">$finalScore<span style="font-size:18px;color:#94a3b8;">/100</span></div>
@@ -223,6 +259,11 @@ function Invoke-NativePowerShellAudit {
 "@
     Set-Content -Path $htmlPath -Value $htmlContent -Encoding UTF8
     Set-Content -Path $summaryPath -Value "# 包括セキュリティ監査レポート`n- 総合得点: **$finalScore / 100点 (Grade $grade)**`n- 検出件数: $($findings.Count) 件`n- 経営影響: 情報漏洩やランサムウェア感染による調査費用・法的報告義務・取引停止リスクを防ぐため、早期是正を推奨します。`n- HTMLレポート: $htmlPath" -Encoding UTF8
+    Add-Content -Path $summaryPath -Value "`n- 状態: $status / 採点不可 / 安全性・公開可否は判定しません。`n- 検査範囲: $($scope | ConvertTo-Json -Compress)`n- 検証状態: PATTERN_MATCH_UNVERIFIED。動的認可・HTTP・DB権限は未検証。" -Encoding UTF8
+    @{ status = $status; overall_score = $null; overall_grade = "N/A"; target = $ScanPath; files_scanned = $scope.scanned_files; scan_scope = $scope; host_audit = $hostChecks; limitations = @("limited_native_patterns", "dynamic_checks_not_run", "no_comparable_numeric_score") } | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $runDir "run.json") -Encoding UTF8
+    ConvertTo-Json -InputObject @($findings) -Depth 8 | Set-Content (Join-Path $runDir "vulnerabilities.json") -Encoding UTF8
+    @{ scorecard = @{ raw_score = $null; final_score = $null; grade = "N/A"; audit_coverage_percent = $null; verdict = "NOT_EVALUATED"; domain_scores = @() } } | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $runDir "audit_scorecard.json") -Encoding UTF8
+    "# 追加検査のご案内`n状態: $status。点数は算出不可。Python版での静的点検と、対象に応じた動的検証が必要です。公開可否は判定しません。" | Set-Content (Join-Path $runDir "maintenance_proposal.md") -Encoding UTF8
 
     Write-Host ""
     Write-Host "[OK] Windows監査レポートを生成しました: $htmlPath" -ForegroundColor Green
@@ -260,6 +301,11 @@ if ([string]::IsNullOrWhiteSpace($TargetPath)) {
     $TargetPath = $RepoRoot
 }
 
+if ($TargetPath -match '^[\\/]{2}|^[A-Za-z][A-Za-z0-9+.-]*://') {
+    Write-Host "URL and network shares are unsupported. Select a local folder." -ForegroundColor Red
+    exit 2
+}
+
 if (-not $NonInteractive -and -not $doHost) {
     Write-Host ""
     Write-Host "このPC/サーバー自体の設定(Firewall・外部開放ポート)も診断しますか？" -ForegroundColor Yellow
@@ -274,6 +320,8 @@ if ($pyCmd) {
     if ($doHost) { $scanArgs += "--include-host-audit" }
     if (-not $NoOpen) { $scanArgs += "--open" }
     if ($pyCmd -eq "py") { & py -3 $RunnerPy @scanArgs } else { & $pyCmd $RunnerPy @scanArgs }
+    exit $LASTEXITCODE
 } else {
     Invoke-NativePowerShellAudit -ScanPath $TargetPath
+    exit 3
 }
