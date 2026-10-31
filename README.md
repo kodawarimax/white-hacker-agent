@@ -3,8 +3,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.8+](https://img.shields.io/badge/Python-3.8%2B-green.svg)](#)
 [![Dependencies: Zero](https://img.shields.io/badge/Dependencies-Zero-brightgreen.svg)](#)
-[![Audit Standard: 100-Point Rubric](https://img.shields.io/badge/Audit-100--Point%20Scorecard-orange.svg)](#)
+[![Audit Standard: 100-Point Rubric](https://img.shields.io/badge/Audit-100--Point%20Scorecard-orange.svg)](https://kodawarimax.github.io/white-hacker-agent/)
+[![Live Demo Report](https://img.shields.io/badge/🌐%20Live%20Demo-監査レポートをブラウザで見る-0ea5e9.svg)](https://kodawarimax.github.io/white-hacker-agent/)
 
+> **🌐 [実際の100点満点セキュリティ監査レポート（49点 ➔ 修正後100点・経営リスク＆損失シナリオ解説付き）をブラウザで今すぐ見る](https://kodawarimax.github.io/white-hacker-agent/)**
+>
 > **「組織全体の構造を理解し、100点満点でセキュリティを包括採点。弱点の発見・修正から『継続保守プログラム提案書』の作成までを一気通貫で標準化」**
 > Claude Code / Codex / Cursor / Antigravity 対応の防衛特化型AIホワイトハッカー＆包括セキュリティ監査基盤
 

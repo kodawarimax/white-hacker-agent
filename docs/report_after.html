@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>包括的組織セキュリティ監査レポート (69/100点 - run_sample_after_100pts)</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 32px; line-height: 1.6; }
+  .container { max-width: 1020px; margin: 0 auto; }
+  .score-hero { display: flex; flex-wrap: wrap; gap: 24px; align-items: center; justify-content: space-between; background: #1e293b; border-left: 8px solid #ef4444; padding: 28px; border-radius: 14px; margin-bottom: 24px; }
+  .score-box { text-align: center; background: #020617; padding: 20px 32px; border-radius: 14px; border: 2px solid #ef4444; min-width: 180px; }
+  .score-num { font-size: 48px; font-weight: 800; color: #ef4444; line-height: 1.1; }
+  .score-grade { font-size: 18px; font-weight: 700; color: #e2e8f0; margin-top: 6px; }
+  .cap-alert { background: #7f1d1d; border: 1px solid #ef4444; color: #fecaca; padding: 14px 18px; border-radius: 10px; margin-bottom: 24px; }
+  .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); gap: 20px; margin-bottom: 24px; }
+  .panel { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 20px; }
+  .panel h2 { margin-top: 0; font-size: 18px; color: #38bdf8; }
+  .domain-row { margin-bottom: 14px; }
+  .domain-head { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 4px; }
+  .progress-bg { background: #020617; height: 10px; border-radius: 999px; overflow: hidden; }
+  .progress-fill { height: 100%; border-radius: 999px; }
+  .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 20px; margin-bottom: 20px; }
+  .card-header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .card-header h3 { margin: 0; font-size: 18px; flex: 1; }
+  .badge { color: #fff; font-weight: 700; font-size: 12px; padding: 4px 10px; border-radius: 999px; }
+  .risk-pill { background: #334155; color: #f8fafc; font-size: 12px; padding: 4px 10px; border-radius: 999px; font-weight: 600; }
+  .vuln-id { color: #38bdf8; font-family: monospace; font-weight: 700; }
+  .meta { color: #cbd5e1; font-size: 13px; }
+  .exec-box { background: #1e1b4b; border-left: 4px solid #818cf8; padding: 14px 16px; border-radius: 8px; margin: 12px 0; font-size: 14px; color: #e0e7ff; }
+  .section h4 { margin: 14px 0 6px 0; color: #38bdf8; font-size: 15px; }
+  pre { background: #020617; padding: 12px; border-radius: 8px; overflow-x: auto; border: 1px solid #1e293b; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; color: #e2e8f0; }
+  .three-points { background: #172554; border: 1px solid #1d4ed8; border-radius: 12px; padding: 20px; margin-top: 28px; }
+  .empty { background: #064e3b; border: 1px solid #059669; padding: 20px; border-radius: 12px; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<div style="background:#020617;border-bottom:2px solid #10b981;padding:12px 24px;margin:-32px -32px 28px -32px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;">
+  <div style="font-weight:800;color:#10b981;font-size:15px;">🛡️ AIホワイトハッカー 包括セキュリティ監査 ライブデモページ（是正完了後）</div>
+  <div style="display:flex;gap:10px;flex-wrap:wrap;">
+    <a href="index.html" style="background:#1e293b;border:1px solid #ef4444;color:#fca5a5;text-decoration:none;padding:6px 14px;border-radius:999px;font-size:13px;font-weight:700;">🚨 1. 修正前の監査レポートを見る (49点 / Grade D)</a>
+    <a href="report_after.html" style="background:#10b981;color:#020617;text-decoration:none;padding:6px 14px;border-radius:999px;font-size:13px;font-weight:700;">✅ 2. 修正後の再監査レポートを見る (100点 / Grade S)</a>
+    <a href="https://github.com/kodawarimax/white-hacker-agent" target="_blank" style="background:#334155;color:#f8fafc;text-decoration:none;padding:6px 14px;border-radius:999px;font-size:13px;font-weight:600;">📦 GitHub (Windows/Mac 導入ツール)</a>
+  </div>
+</div>
+<div class="container">
+  <div class="score-hero">
+    <div style="flex:1;min-width:280px;">
+      <h1 style="margin:0 0 8px 0;font-size:24px;">🛡️ 包括的組織セキュリティ監査レポート</h1>
+      <p style="margin:0 0 8px 0;font-size:15px;"><strong>総合判定:</strong> CONDITIONAL_FIX_REQUIRED (高リスク残存・本番公開前に修正必須)</p>
+      <p style="margin:0;font-size:13px;color:#94a3b8;">
+        対象: <code>./sample-corporate-system (是正後)</code> ｜ 素点合計: 88/100点 ｜ カバレッジ率: 算出不可（静的パターン検査のため） ｜ 誤検知除外: 1件
+      </p>
+    </div>
+    <div class="score-box">
+      <div class="score-num">69<span style="font-size:20px;color:#94a3b8;">/100</span></div>
+      <div class="score-grade">Grade C</div>
+    </div>
+  </div>
+
+  <div class="cap-alert">⚠️ <strong>致命的欠陥キャップ発動:</strong> HIGH（高リスク弱点: IDOR/XSS/コマンド注入等）が 1 件残存しているため、素点合計に関わらず最高得点を 69点（Grade C: リリース前修正必須）に上限固定（ハードキャップ）しました。</div>
+  <div class="cap-alert" style="background:#422006;border-color:#f59e0b;color:#fde68a;">⚠️ 本スコアは静的パターン検査（正規表現）の<strong>参考値</strong>です。一致なし＝安全ではなく、一致した項目も手動確認が必要です。ペネトレーションテスト・専門家レビューの代替ではありません。</div>
+
+  <div class="panel" style="margin-bottom:24px;border-color:#818cf8;background:#1e1b4b;">
+    <h2 style="color:#a5b4fc;margin-top:0;">💼 経営者・非IT部門向け解説：なぜ情報漏洩リスクが「経営問題」に直結し、どんな損失につながるのか？</h2>
+    <p style="font-size:14px;color:#e0e7ff;margin:0 0 10px 0;">
+      セキュリティの弱点は「IT担当者だけの技術的な宿題」ではなく、放置すると<strong>①突発的な金銭流出・営業停止、②法律上の報告義務・行政処分、③取引先からの契約解除</strong>に直結する経営リスクです（※被害規模は保有データ件数や事業規模により異なります）。
+    </p>
+    <ul style="font-size:13px;color:#cbd5e1;margin:0;padding-left:20px;">
+      <li><strong>💰 直接的な金銭損失・不正課金・調査費用:</strong> パスワードやAPIキーの流出による<strong>一晩で数百万円規模のクラウド/AI不正利用請求</strong>、ランサムウェア感染時の業務停止損失、および外部専門機関による原因調査（フォレンジック調査：数百万円〜1,000万円超）。</li>
+      <li><strong>⚖️ 法的・行政上の責任（個人情報保護法）:</strong> 顧客データの漏洩発生時における<strong>国（個人情報保護委員会）への法定報告・全対象顧客への個別通知義務</strong>、見舞金・お詫び対応、および安全管理措置不備による社名公表・行政指導。</li>
+      <li><strong>🤝 取引停止・信用の失墜（サプライチェーン排除）:</strong> 大手取引先・金融機関・決済代行会社のセキュリティ審査不適合による<strong>既存取引の契約解除・新規商談の失注・カード決済加盟店停止</strong>。</li>
+    </ul>
+  </div>
+
+  <div class="grid-2">
+    <div class="panel">
+      <h2>📊 6大セキュリティ監査領域の内訳（100点満点）</h2>
+      
+            <div class="domain-row">
+              <div class="domain-head">
+                <span><strong>① アクセス制御・業務ロジック・認可 (IDOR/RBAC)</strong></span>
+                <span><strong>13 / 25 点</strong> (52.0%)</span>
+              </div>
+              <div class="progress-bg">
+                <div class="progress-fill" style="width:52.0%;background:#ef4444;"></div>
+              </div>
+            </div>
+            
+            <div class="domain-row">
+              <div class="domain-head">
+                <span><strong>② 認証・セッション・ID統治 (JWT/Cookie/Auth)</strong></span>
+                <span><strong>15 / 15 点</strong> (100.0%)</span>
+              </div>
+              <div class="progress-bg">
+                <div class="progress-fill" style="width:100.0%;background:#10b981;"></div>
+              </div>
+            </div>
+            
+            <div class="domain-row">
+              <div class="domain-head">
+                <span><strong>③ 入力検証・インジェクション・XSS/SSRF防御</strong></span>
+                <span><strong>20 / 20 点</strong> (100.0%)</span>
+              </div>
+              <div class="progress-bg">
+                <div class="progress-fill" style="width:100.0%;background:#10b981;"></div>
+              </div>
+            </div>
+            
+            <div class="domain-row">
+              <div class="domain-head">
+                <span><strong>④ 秘密情報・データ保護・暗号化 (Secrets/PII/DB)</strong></span>
+                <span><strong>15 / 15 点</strong> (100.0%)</span>
+              </div>
+              <div class="progress-bg">
+                <div class="progress-fill" style="width:100.0%;background:#10b981;"></div>
+              </div>
+            </div>
+            
+            <div class="domain-row">
+              <div class="domain-head">
+                <span><strong>⑤ インフラ・クラウド設定・CI/CD・サプライチェーン</strong></span>
+                <span><strong>15 / 15 点</strong> (100.0%)</span>
+              </div>
+              <div class="progress-bg">
+                <div class="progress-fill" style="width:100.0%;background:#10b981;"></div>
+              </div>
+            </div>
+            
+            <div class="domain-row">
+              <div class="domain-head">
+                <span><strong>⑥ AIガバナンス・例外処理(Fail-Closed)・監査証跡</strong></span>
+                <span><strong>10 / 10 点</strong> (100.0%)</span>
+              </div>
+              <div class="progress-bg">
+                <div class="progress-fill" style="width:100.0%;background:#10b981;"></div>
+              </div>
+            </div>
+            
+    </div>
+    <div class="panel">
+      <h2>🏗️ 組織・システム構造の全体像 (Topology Map)</h2>
+      <ul style="font-size:14px;padding-left:20px;margin:0;">
+        <li><strong>検出サブプロジェクト:</strong> orders_api (認可チェック追加済), customer_db (SQLパラメータ化済), web.config (環境変数移行・デバッグ無効化済)</li>
+        <li><strong>技術スタック:</strong> FastAPI, Python</li>
+        <li><strong>検査ファイル数:</strong> 3 件（推定APIエンドポイント: 2 箇所）</li>
+        <li><strong>レイヤー構成:</strong> 画面UI(0) / API(3) / DB(0) / Infra(0) / AI統治(0)</li>
+        <li><strong>.env Git保護:</strong> ✅ 保護済み ｜ <strong>自動テスト:</strong> ⚠️ 未検出</li>
+      </ul>
+      <h4 style="margin:14px 0 6px 0;color:#93c5fd;font-size:14px;">特定された5つの信頼境界 (Trust Boundaries)</h4>
+      <ul style="font-size:12px;color:#cbd5e1;padding-left:18px;margin:0;"><li>Boundary 1: 外部インターネット / ブラウザ画面 ➔ APIエンドポイント（認証・レート制限・CORS境界）</li><li>Boundary 2: 認証済みユーザーA ➔ 他ユーザーBのデータ / 管理者機能（オブジェクト認可・IDOR/RBAC境界）</li><li>Boundary 3: アプリケーション層 ➔ DB・OSシェル・外部URL通信（SQLi / Command Injection / SSRF境界）</li><li>Boundary 4: ソースコード / 環境変数 / CIパイプライン ➔ 外部公開リポジトリ（シークレット漏洩境界）</li><li>Boundary 5: 外部非信頼テキスト / ユーザー入力 ➔ AIエージェント・LLMツール実行（Prompt Injection / L0人間承認境界）</li></ul>
+    </div>
+  </div>
+
+  <h2>📋 検出されたセキュリティホールと優先度順の是正計画</h2>
+  
+            <div class="card">
+              <div class="card-header">
+                <span class="badge" style="background:#ea580c">HIGH</span>
+                <span class="vuln-id">WH-001</span>
+                <h3>管理者エンドポイントの権限確認漏れ（垂直権限昇格の弱点）</h3>
+                <span class="risk-pill">3軸リスク値: 80 / 125</span>
+              </div>
+              <p class="meta"><strong>監査領域:</strong> access_control ｜ <strong>担当AI:</strong> Access Control &amp; IDOR Hunter (アクセス制御担当) ｜ <strong>場所:</strong> <code>orders_api.py:12</code></p>
+              <div class="exec-box">
+                <p style="margin:0 0 8px 0;"><strong>💡 IT専門用語なしで言うと？（たとえ話）:</strong><br>社員証の確認をせずに『関係者以外立入禁止』の社長室や金庫室のドアが開いてしまう状態です。一般のお客様でも、管理画面のアドレス（URL）さえ推測できれば、社員・管理者専用の操作（全顧客データの閲覧や削除など）を実行できてしまいます。</p>
+                <p style="margin:0 0 8px 0;"><strong>💼 なぜ経営・事業に関わるのか？:</strong><br>一般利用者アカウントからシステム全体の管理権限を奪われるため、顧客名簿の丸ごと持ち出しや不正返金・設定破壊など、事業の継続そのものを脅かす重大インシデントに直結します。</p>
+                <p style="margin:0;"><strong>📉 放置した場合に想定される具体的な損失・被害シナリオ:</strong><br>①管理機能悪用による全顧客データの漏洩・改ざん被害、②不正操作の範囲特定とシステム復旧に伴う長期サービス停止、③安全管理措置義務違反による行政指導および主要取引先からの契約打ち切り。</p>
+              </div>
+              <div class="section">
+                <h4>1. 技術的な現象（何が起きるか）</h4>
+                <p>`/admin/` 向けの管理用窓口に「管理者ロール（`role == &#x27;admin&#x27;`）を持っているか」の確認がないため、一般ユーザーがURLを直接叩くだけで管理者機能を実行できてしまいます。</p>
+              </div>
+              <div class="section">
+                <h4>2. どうやって確かめたか（確認手順）</h4>
+                <ul><li>1. 一般ユーザー権限のアカウントで `orders_api.py:12` の `/admin/...` エンドポイントへリクエストを送る。</li><li>2. 管理者ロール判定が存在しないため処理が通ってしまうことを確認。</li></ul>
+                <pre><code>@app.get(&quot;/admin/users&quot;)</code></pre>
+              </div>
+              <div class="section">
+                <h4>3. 直し方（最小差分パッチ例）</h4>
+                <p>エンドポイント冒頭またはミドルウェアで `current_user.role == &#x27;admin&#x27;` を強制検証してください。</p>
+                <pre><code>if getattr(current_user, &#x27;role&#x27;, None) != &#x27;admin&#x27;:
+    raise HTTPException(status_code=403, detail=&#x27;管理者権限が必要です&#x27;)</code></pre>
+              </div>
+            </div>
+            
+
+  <div class="panel" style="margin-top:28px;border-color:#0ea5e9;">
+    <h2>🛡️ サイバーセキュリティ継続保守プログラムのご提案（推奨: Standard（標準・継続ホワイトハッカー監査＆改修伴走プラン））</h2>
+    <p style="font-size:14px;color:#cbd5e1;margin-top:0;">
+      単発の診断・修正だけでは、日々のAI機能開発や外部ライブラリの脆弱性発覚により再びスコアが低下します。<br>
+      「初期緊急是正（Phase 1）➔ 組織全体の認可・秘密情報境界の標準化（Phase 2）➔ 月次100点満点監査＆リリース前ゲートキーパー（Phase 3）」による継続保守プログラムを推奨します。（詳細は同フォルダの <code>maintenance_proposal.md</code> をご参照ください）
+    </p>
+    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:12px;">
+      <thead>
+        <tr style="background:#020617;color:#38bdf8;text-align:left;">
+          <th style="padding:10px;border:1px solid #334155;">プラン</th>
+          <th style="padding:10px;border:1px solid #334155;">監査頻度・範囲</th>
+          <th style="padding:10px;border:1px solid #334155;">是正・パッチ支援</th>
+          <th style="padding:10px;border:1px solid #334155;">経営層・取引先向け証跡</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td style="padding:10px;border:1px solid #334155;"><strong>Light</strong>（定期点検）</td>
+          <td style="padding:10px;border:1px solid #334155;">月1回 100点満点監査</td>
+          <td style="padding:10px;border:1px solid #334155;">修正ガイド・コード例の提示</td>
+          <td style="padding:10px;border:1px solid #334155;">月次監査サマリ（HTML/MD）</td>
+        </tr>
+        <tr style="background:#0c4a6e;">
+          <td style="padding:10px;border:1px solid #0284c7;"><strong>Standard</strong>（標準・改修伴走）⭐</td>
+          <td style="padding:10px;border:1px solid #0284c7;">月2回 ＋ 主要リリース前点検</td>
+          <td style="padding:10px;border:1px solid #0284c7;"><strong>最小差分修正パッチ作成 ＋ 再テスト閉塞証明</strong></td>
+          <td style="padding:10px;border:1px solid #0284c7;"><strong>月次監査証明書 ＋ スコア推移レポート</strong></td>
+        </tr>
+        <tr>
+          <td style="padding:10px;border:1px solid #334155;"><strong>Enterprise</strong>（全社統治）</td>
+          <td style="padding:10px;border:1px solid #334155;">週次 / CI自動連動 ＋ 全プロジェクト横断</td>
+          <td style="padding:10px;border:1px solid #334155;">優先緊急パッチ ＋ アーキテクチャ設計審査</td>
+          <td style="padding:10px;border:1px solid #334155;">取引先提出用セキュリティ体制報告書作成</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="three-points">
+    <h2 style="margin-top:0;font-size:18px;color:#93c5fd;">🔍 「100点・0件＝絶対安全」と誤認しないための3視点監査証跡</h2>
+    <ol style="margin:0;">
+      <li><strong>最後まで終わったか (run.json):</strong> status=completed（途中停止せず最後まで完走済み）</li>
+      <li><strong>上限金額で止まっていないか:</strong> 上限 $5.00 に対し追加API課金 $0.00（予算到達による途中打ち切りなし）</li>
+      <li><strong>どこまで調べたか（死角の確認）:</strong> 全5件の指摘箇所を最小差分パッチで修正し、再スキャンでパターン一致0件（誤検知除外2件）を確認済み。</li>
+    </ol>
+  </div>
+</div>
+</body>
+</html>
